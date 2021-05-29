@@ -3,6 +3,5 @@
 /.nrepl-port
 /.repl
 /.idea
-pom.xml
 *.iml
 *.asc

@@ -4,6 +4,10 @@ Memento cache backed by Redis. The underlying library is Carmine (refer to their
 
 Offers **guarantees that a cache entry is calculated only once even if using multiple JVMs**.
 
+## Dependency
+
+[![Clojars Project](https://img.shields.io/clojars/v/org.clojars.roklenarcic/memento-redis.svg)](https://clojars.org/org.clojars.roklenarcic/memento-redis)
+
 ## Usage
 
 Use this library by invoking Memento functions with a new cache type and properties.
