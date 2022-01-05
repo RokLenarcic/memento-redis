@@ -4,7 +4,7 @@
   <packaging>jar</packaging>
   <groupId>org.clojars.roklenarcic</groupId>
   <artifactId>memento-redis</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
   <name>memento-redis</name>
   <dependencies>
     <dependency>
@@ -15,7 +15,7 @@
     <dependency>
       <groupId>org.clojars.roklenarcic</groupId>
       <artifactId>memento</artifactId>
-      <version>0.9.5</version>
+      <version>0.9.6</version>
     </dependency>
     <dependency>
       <groupId>com.taoensso</groupId>
