@@ -1,8 +1,14 @@
 {:paths ["src"]
 
- :deps {org.clojars.roklenarcic/memento {:mvn/version "0.9.6"}
+ :deps {org.clojars.roklenarcic/memento {:mvn/version "0.9.34"}
         com.taoensso/carmine {:mvn/version "3.1.0"}}
 
  :aliases {:dev {:extra-paths ["test"]
                  :jvm-opts ["-XX:-OmitStackTraceInFastThrow"
-                            "-Djdk.attach.allowAttachSelf"]}}}
+                            "-Djdk.attach.allowAttachSelf"]}
+           :build {:deps {io.github.seancorfield/build-clj {:git/tag "v0.6.4" :git/sha "c21cfde"}}
+                   :ns-default build}
+           :test {:extra-paths ["test"]
+                  :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}
+                               io.github.cognitect-labs/test-runner
+                               {:git/tag "v0.5.0" :git/sha "48c3c67"}}}}}
