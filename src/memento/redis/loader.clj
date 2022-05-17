@@ -123,11 +123,10 @@
   "Perform maintenance multithreaded, one future per each connection after the first."
   [^ConcurrentHashMap maint refresh-load-markers?]
   ;; do maintenance of one conn in this thread, the rest in futures
-  (loop [[conn+map & more] (into [] (.entrySet maint))
-         futures (list)]
-    (if more
-      (recur more (conj futures (future (maintain-conn-loads (key conn+map) (val conn+map) refresh-load-markers?))))
-      ;; process last conn in this thread and await others
+  (let [[conn+map & more] (seq (.entrySet maint))
+        futures (map #(future (maintain-conn-loads (key %) (val %) refresh-load-markers?)) more)]
+    ;; process first conn in this thread and await others
+    (when conn+map
       (do (maintain-conn-loads (key conn+map) (val conn+map) refresh-load-markers?)
           (doseq [f futures] (deref f))))))
 
