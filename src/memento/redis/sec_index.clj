@@ -1,20 +1,21 @@
 (ns memento.redis.sec-index
   (:require [clojure.java.io :as io]
+            [memento.redis.keys :as keys]
             [taoensso.carmine :as car])
   (:import (java.util.concurrent ConcurrentHashMap)))
 
-(def add-to-index-script "redis.call('sadd', _:id-key, _:k)\nredis.call('sadd', _:indexes, _:id-key)")
 (def invalidate-script (slurp (io/resource "memento/redis/sec-index-invalidate.lua")))
+(def finish-load-script (slurp (io/resource "memento/redis/poll/finish-load-w-sec.lua")))
 
 (def ^ConcurrentHashMap all-indexes
   "Stores pairs of connection + indexes key seen"
   (ConcurrentHashMap. (int 4) (float 0.75) (int 8)))
 
-(defn add-to-index
-  "Add a key to sec index. indexes-key is the main key that keeps all the
-  secondary index keys, id-key is secondary index set. It assumes that it's done inside carw"
-  [indexes-key id-key k]
-  (car/lua add-to-index-script {:k k :id-key id-key :indexes indexes-key} {}))
+(defn keys-param-for-sec-idx
+  "Script to insert an entry with secondary indexes has special KEYS structure of
+  [k, indexes-key, id-key1, id-key2, ....]."
+  [kg k cache-name tag-idents]
+  (apply vector k (keys/sec-indexes-key kg) (map #(keys/sec-index-id-key kg cache-name %) tag-idents)))
 
 (defn invalidate-by-index
   "Remove (invalidate) secondary index and all the keys therein"

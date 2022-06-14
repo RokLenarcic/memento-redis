@@ -5,7 +5,8 @@
             [memento.redis.keys :as keys]
             [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car]
-            [taoensso.timbre :as log])
+            [taoensso.timbre :as log]
+            [memento.core :as c])
   (:import (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiFunction BiConsumer)
            (clojure.lang Keyword)
@@ -179,6 +180,7 @@
 
 (def abandon-load-script (slurp (io/resource "memento/redis/poll/abandon-load.lua")))
 (def finish-load-script (slurp (io/resource "memento/redis/poll/finish-load.lua")))
+(def bulk-set (slurp (io/resource "memento/redis/poll/bulk-set.lua")))
 
 (defprotocol Loader
   "A loader for the specific Cache"
@@ -186,7 +188,9 @@
     "Returns either an IDeref that returns the value of the entry, or nil if the entry is not
     being cached or calculated. It can be assumed that we claimed a load marker if nil was returned.")
   (complete [this conn k v]
-    "Finishes a load with the given value, giving the entry the desired expire."))
+    "Finishes a load with the given value, giving the entry the desired expire.")
+  (put [this conn k v]
+    "Pushes an entry into cache, ignoring any loading mechanism and locks."))
 
 (defrecord PollingLoader [maint-map kg cname ttl-ms fade-ms]
   Loader
@@ -215,25 +219,33 @@
       (fn [entry ret-cb]
         (if-let [marker (:marker entry)]
           (let [unw-v (b/unwrap-meta v)
-                redis-fn #(if (dont-cache? v)
-                            (car/lua abandon-load-script {:k k} {:load-marker %})
-                            (car/lua finish-load-script {:k k} {:load-marker % :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}))
-                tag-idents (:tag-idents v)]
+                values {:load-marker marker :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
+                {:keys [tag-idents no-cache?]} v]
             (try
               (car/wcar conn
-                (redis-fn marker)
-                (when (seq tag-idents)
-                  (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true)
-                  (doseq [id (when (instance? EntryMeta v) (:tag-idents v))]
-                    (sec-index/add-to-index
-                      (keys/sec-indexes-key kg)
-                      (keys/sec-index-id-key kg cname id) k))))
+                (cond
+                  no-cache? (car/lua abandon-load-script {:k k} (select-keys values [:load-marker]))
+                  (seq tag-idents) (do (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
+                                       (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true))
+                  :else (car/lua finish-load-script {:k k} values)))
               (catch Exception e
                 (log/warn e "Error completing load to Redis for key " k)))
             (deliver (:result entry) unw-v)
             (ret-cb unw-v)
             nil)
-          entry)))))
+          entry))))
+  (put [this conn k v]
+    (let [unw-v (b/unwrap-meta v)
+          ;; don't use marker
+          values {:load-marker "" :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
+          {:keys [tag-idents]} v]
+      (try
+        (car/wcar conn
+          (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
+          (when tag-idents (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true)))
+        (catch Exception e
+          (log/warn e "Error putting value to Redis for key " k)))
+      nil)))
 
 (defn if-cached
   "Retrieves an entry from redis, doing no loading at all, returning b/absent if there is no

@@ -57,15 +57,27 @@
         (keys/sec-index-id-key keygen cname id))
       this))
   (put-all [this segment args-to-vals]
-    (let [{:keys [key-fn conn]} fns
-          c (conn)
-          set-fn (if-let [expire-ms (or ttl-ms fade-ms)]
-                   #(car/psetex %1 expire-ms %2)
-                   car/set)]
-      (doseq [batch (partition-all 100 args-to-vals)]
-        (car/wcar c
-          (doseq [[k v] batch]
-            (set-fn (key-fn segment k) (loader/cval v)))))))
+    (when (seq args-to-vals)
+      (let [{:keys [key-fn conn]} fns
+            c (conn)
+            ;; collect all kv-s without secondary index to bulk push them, but run secondary index
+            ;; ones one by one
+            remaining (->> args-to-vals
+                           (reduce-kv
+                             (fn [coll k v]
+                               (let [cval (loader/cval v) ckey (key-fn segment k)]
+                                 (if (:tag-idents v)
+                                   (do (loader/put lookup c ckey cval) coll)
+                                   (conj coll [ckey cval]))))
+                             [])
+                           car/return
+                           (car/wcar c))]
+        ;; those without secondary indexes we can push freely
+        (doseq [batch (partition-all 100 remaining)]
+          (car/wcar c
+            (car/lua loader/bulk-set
+                     (mapv first batch)
+                     (conj (mapv second batch) (or ttl-ms fade-ms -1))))))))
   (as-map [this]
     (let [{:keys [conn keygen]} fns]
       (util/kv-by-pattern

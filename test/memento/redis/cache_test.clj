@@ -132,7 +132,10 @@
   (let [f (memo inc inf)]
     (memo-add! f {[1] 100})
     (is (= {[1] 100} (as-map f)))
-    (is (= 100 (util/get-entry* f [1])))))
+    (is (= 100 (util/get-entry* f [1])))
+    (is (= 100 (f 1)))
+    (memo-add! f {[2] (with-tag-id 200 :my-tag 1)})
+    (is (= 200 (f 2)))))
 
 (deftest invalidate-test
   (let [f (memo inc inf)
@@ -198,3 +201,22 @@
     (Thread/sleep 300)
     (f)
     (is (= @access-count 1))))
+
+(deftest invalidate-by-tag
+  (let [access-count (atom 0)
+        f (memo (fn [x] (swap! access-count inc)
+                  (with-tag-id x :test-tag 1)) [:test-tag] inf)]
+    ;; should not throw exception on empty tag
+    (memo-clear-tag! :test-tag 1)
+    (memo-add! f {[1] (with-tag-id 2 :test-tag 2)})
+    (f 1)
+    (f 1)
+    (is (= 0 @access-count))
+    (memo-clear-tag! :test-tag 2)
+    (f 1)
+    (f 1)
+    (is (= 1 @access-count))
+    (memo-clear-tag! :test-tag 1)
+    (f 1)
+    (f 1)
+    (is (= 2 @access-count))))
