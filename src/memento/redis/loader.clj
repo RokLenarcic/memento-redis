@@ -5,19 +5,13 @@
             [memento.redis.keys :as keys]
             [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car]
-            [taoensso.timbre :as log]
-            [memento.core :as c])
+            [taoensso.timbre :as log])
   (:import (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiFunction BiConsumer)
            (clojure.lang Keyword)
-           (java.util ArrayList List UUID)
-           (memento.base EntryMeta)))
+           (java.util ArrayList List UUID)))
 
 (defrecord LoadMarker [x])
-
-(defn dont-cache? [v]
-  (and (instance? EntryMeta v)
-       (:no-cache? v)))
 
 (defn new-load-marker [] (->LoadMarker (UUID/randomUUID)))
 
