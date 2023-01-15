@@ -1,6 +1,6 @@
 {:paths ["src"]
 
- :deps {org.clojars.roklenarcic/memento {:mvn/version "1.0.40"}
+ :deps {org.clojars.roklenarcic/memento {:mvn/version "1.1.42"}
         com.taoensso/carmine {:mvn/version "3.1.0"}}
 
  :aliases {:dev {:extra-paths ["test"]

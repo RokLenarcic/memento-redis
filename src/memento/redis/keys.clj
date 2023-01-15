@@ -2,7 +2,8 @@
   (:require [taoensso.carmine :as car]
             [taoensso.carmine.protocol :as p])
   (:import (java.nio ByteBuffer)
-           (java.security MessageDigest)))
+           (java.security MessageDigest)
+           (memento.base Segment)))
 
 (def ^MessageDigest sha1-digest (MessageDigest/getInstance "sha1"))
 (def ^MessageDigest sha256-digest (MessageDigest/getInstance "sha-256"))
@@ -65,9 +66,9 @@
     "A wildcard (glob) key that will return all keys used by a particular cache.")
   (segment-wildcard-key [this cache-name segment]
     "A wildcard (glob) key that will return all keys used by a particular memoized
-    function. Segment is memento.base/Segment.")
+    function. Segment is memento.base.Segment.")
   (entry-key [this cache-name segment args-key]
-    "A concrete key for an entry. Segment is memento.base/Segment.")
+    "A concrete key for an entry. Segment is memento.base.Segment.")
   (sec-index-id-key [this cache-name id]
     "ID for the SET that houses all the keys that get invalidated by id.")
   (sec-indexes-key [this]
@@ -86,9 +87,9 @@
       (cache-wildcard-key [this cache-name]
         (wildcard (list memento-space-prefix cache-name)))
       (segment-wildcard-key [this cache-name segment]
-        (wildcard (list memento-space-prefix cache-name (segment-id-fn (:id segment)))))
+        (wildcard (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)))))
       (entry-key [this cache-name segment args-key]
-        (list memento-space-prefix cache-name (segment-id-fn (:id segment)) args-key))
+        (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)) args-key))
       (sec-index-id-key [this cache-name id]
         (list memento-secondary-index-prefix cache-name id))
       (sec-indexes-key [this]

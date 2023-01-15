@@ -5,7 +5,8 @@
             [memento.redis.util :as util]
             [memento.core :as core]
             [memento.mount :as mount])
-  (:import (memento.redis.cache RedisCache)))
+  (:import (memento.base Segment)
+           (memento.redis.cache RedisCache)))
 
 (def prefix "MMR-TEST")
 
@@ -18,7 +19,7 @@
 (defn test-key
   "An entry key in test keyspace."
   [k]
-  (keys/entry-key test-keygen "" {:id "" :key-fn identity} k))
+  (keys/entry-key test-keygen "" (Segment. identity identity "") k))
 
 (defn add-entry
   "Add a full test generator keyed entry"
@@ -34,7 +35,7 @@
   "Retrieve the arg list value from Redis"
   [f args]
   (let [cache (core/active-cache f)
-        segment (-> (mount/mount-point f) :segment)
+        segment (.segment ^Segment f)
         k ((-> cache :fns :key-fn) segment args)]
     (when (instance? RedisCache cache)
       (car/wcar ((-> cache :fns :conn)) (car/get k)))))

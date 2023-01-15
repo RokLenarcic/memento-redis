@@ -3,13 +3,24 @@
             [memento.base :as b]
             [memento.redis.sec-index :as sec-index]
             [memento.redis.keys :as keys]
+            [taoensso.nippy :as nippy]
             [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car]
             [taoensso.timbre :as log])
-  (:import (java.util.concurrent ConcurrentHashMap)
+  (:import (java.io DataInput DataOutput)
+           (memento.base EntryMeta)
+           (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiFunction BiConsumer)
            (clojure.lang Keyword)
            (java.util ArrayList List UUID)))
+
+(nippy/extend-freeze EntryMeta ::b/entry-meta [^EntryMeta x data-output]
+                     (nippy/-freeze-with-meta! (.getV x) data-output)
+                     (.writeBoolean ^DataOutput data-output (.isNoCache x))
+                     (nippy/-freeze-with-meta! (.getTagIdents x) data-output))
+
+(nippy/extend-thaw ::b/entry-meta [data-input]
+  (EntryMeta. (nippy/thaw-from-in! data-input) (.readBoolean ^DataInput data-input) (nippy/thaw-from-in! data-input)))
 
 (defrecord LoadMarker [x])
 
@@ -212,16 +223,22 @@
       maint-map conn k
       (fn [entry ret-cb]
         (if-let [marker (:marker entry)]
-          (let [unw-v (b/unwrap-meta v)
+          (let [entry-meta? (instance? EntryMeta v)
+                unw-v (if entry-meta? (.getV ^EntryMeta v) v)
                 values {:load-marker marker :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
-                {:keys [tag-idents no-cache?]} v]
+                tag-idents (when entry-meta? (seq (.getTagIdents ^EntryMeta v)))]
             (try
               (car/wcar conn
                 (cond
-                  no-cache? (car/lua abandon-load-script {:k k} (select-keys values [:load-marker]))
-                  (seq tag-idents) (do (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
-                                       (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true))
-                  :else (car/lua finish-load-script {:k k} values)))
+                  (and entry-meta? (.isNoCache ^EntryMeta v))
+                  (car/lua abandon-load-script {:k k} (select-keys values [:load-marker]))
+
+                  (seq tag-idents)
+                  (do (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
+                      (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true))
+
+                  :else
+                  (car/lua finish-load-script {:k k} values)))
               (catch Exception e
                 (log/warn e "Error completing load to Redis for key " k)))
             (deliver (:result entry) unw-v)
@@ -232,7 +249,7 @@
     (let [unw-v (b/unwrap-meta v)
           ;; don't use marker
           values {:load-marker "" :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
-          {:keys [tag-idents]} v]
+          tag-idents (when (instance? EntryMeta v) (.getTagIdents ^EntryMeta v))]
       (try
         (car/wcar conn
           (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)

@@ -6,9 +6,9 @@
             [memento.redis.cache :as cache]
             [memento.redis :as mr]
             [memento.redis.keys :as keys]
-            [memento.redis.test-util :as util]
-            [memento.mount :as mount])
-  (:import (clojure.lang ExceptionInfo)))
+            [memento.redis.test-util :as util])
+  (:import (clojure.lang ExceptionInfo)
+           (memento.base Segment)))
 
 (use-fixtures :each util/fixture-wipe)
 
@@ -41,10 +41,10 @@
 (deftest conf-key-fn-test
   (are [conf segment result]
     (is (= result ((cache/conf-key-fn (cache/conf-keygen {}) conf) segment [10])))
-    {} {:id :id :key-fn identity} (list "M^" "" :id [10])
-    {mr/name "cache-name"} {:id :id :key-fn identity} (list "M^" "cache-name" :id [10])
-    {mc/key-fn (comp inc first)} {:id :id :key-fn identity} (list "M^" "" :id 11)
-    {mc/key-fn inc} {:id :id :key-fn (comp #(* 2 %) first)} (list "M^" "" :id 21)))
+    {} (Segment. identity identity :id) (list "M^" "" :id [10])
+    {mr/name "cache-name"} (Segment. identity identity :id) (list "M^" "cache-name" :id [10])
+    {mc/key-fn (comp inc first)} (Segment. identity identity :id) (list "M^" "" :id 11)
+    {mc/key-fn inc} (Segment. identity (comp #(* 2 %) first) :id) (list "M^" "" :id 21)))
 
 (deftest as-map-test
   (let [memod (memo inc inf)]
@@ -169,8 +169,8 @@
         generate (fn [] (f 1) (f 2) (g 1) (g 2))]
     (testing "individual clear"
       (generate)
-      (is (= 3 (b/if-cached (active-cache f) (-> (mount/mount-point f) :segment) (seq [2]))))
-      (is (= b/absent (b/if-cached (active-cache f) (-> (mount/mount-point f) :segment) (seq [5])))))))
+      (is (= 3 (b/if-cached (active-cache f) (.segment f) (seq [2]))))
+      (is (= b/absent (b/if-cached (active-cache f) (.segment f) (seq [5])))))))
 
 (deftest conf-millis-test
   (is (= 3000 (cache/conf-millis {:m 3} :m)))

@@ -9,10 +9,11 @@
     [memento.redis.sec-index :as sec-index]
     [memento.redis.util :as util]
     [taoensso.carmine :as car])
-  (:import (clojure.lang IDeref)))
+  (:import (clojure.lang AFn IDeref)
+           (memento.base EntryMeta ICache Segment)))
 
 (defrecord RedisCache [conf fns cname ttl-ms fade-ms lookup]
-  b/Cache
+  ICache
   (conf [this] conf)
   (cached [this segment args]
     (let [{:keys [conn key-fn ret-fn]} fns
@@ -24,14 +25,14 @@
             (recur segment args)
             ret))
         (try
-          (let [f (if ret-fn (fn [& args] (ret-fn args (apply (:f segment) args)))
-                             (:f segment))
-                calculated (apply f args)]
+          (let [f (if ret-fn (fn [& args] (ret-fn args (apply (.getF ^Segment segment) args)))
+                             (.getF ^Segment segment))
+                calculated (AFn/applyToHelper f args)]
             (loader/complete lookup c k calculated))
           (catch Exception e
             (loader/complete lookup c k (c/do-not-cache b/absent))
             (throw e))))))
-  (if-cached [this segment args]
+  (ifCached [this segment args]
     (let [{:keys [conn key-fn]} fns]
       (loader/if-cached (conn) (key-fn segment args) fade-ms)))
   (invalidate [this segment]
@@ -43,20 +44,20 @@
     (let [{:keys [conn key-fn]} fns]
       (car/wcar (conn) (car/del (key-fn segment args)))
       this))
-  (invalidate-all [this]
+  (invalidateAll [this]
     (let [{:keys [conn keygen]} fns]
       (util/del-keys-by-pattern
         (conn)
         (keys/cache-wildcard-key keygen cname))
       this))
-  (invalidate-id [this id]
+  (invalidateId [this id]
     (let [{:keys [conn keygen]} fns]
       (sec-index/invalidate-by-index
         (conn)
         (keys/sec-indexes-key keygen)
         (keys/sec-index-id-key keygen cname id))
       this))
-  (put-all [this segment args-to-vals]
+  (addEntries [this segment args-to-vals]
     (when (seq args-to-vals)
       (let [{:keys [key-fn conn]} fns
             c (conn)
@@ -66,7 +67,7 @@
                            (reduce-kv
                              (fn [coll k v]
                                (let [cval (loader/cval v) ckey (key-fn segment k)]
-                                 (if (:tag-idents v)
+                                 (if (and (instance? EntryMeta v) (.getTagIdents ^EntryMeta v))
                                    (do (loader/put lookup c ckey cval) coll)
                                    (conj coll [ckey cval]))))
                              [])
@@ -78,13 +79,13 @@
             (car/lua loader/bulk-set
                      (mapv first batch)
                      (conj (mapv second batch) (or ttl-ms fade-ms -1))))))))
-  (as-map [this]
+  (asMap [this]
     (let [{:keys [conn keygen]} fns]
       (util/kv-by-pattern
         (conn)
         (keys/cache-wildcard-key keygen cname)
         #(next (next %)))))
-  (as-map [this segment]
+  (asMap [this segment]
     (let [{:keys [conn keygen]} fns]
       (util/kv-by-pattern
         (conn)
@@ -117,10 +118,10 @@
 (defn conf-key-fn [kg conf]
   (let [cache-name (conf-cache-name conf)]
     (if-let [key-fn (mc/key-fn conf)]
-      (fn [segment args]
-        (keys/entry-key kg cache-name segment (key-fn ((:key-fn segment) (seq args)))))
-      (fn [segment args]
-        (keys/entry-key kg cache-name segment ((:key-fn segment) (seq args)))))))
+      (fn [^Segment segment args]
+        (keys/entry-key kg cache-name segment (key-fn ((.getKeyFn segment) (seq args)))))
+      (fn [^Segment segment args]
+        (keys/entry-key kg cache-name segment ((.getKeyFn segment) (seq args)))))))
 
 (defn functions [conf]
   (let [kg (conf-keygen conf)]
