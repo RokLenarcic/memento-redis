@@ -12,7 +12,7 @@
 
 (def sleep-interval
   "Time in ms between thread wakeups."
-  (Integer/parseInt (System/getProperty "memento.redis.daemon_interval" "50")))
+  (Long/parseLong (System/getProperty "memento.redis.daemon_interval" "50")))
 
 (def load-markers-interval 1000)
 (def sec-index-interval 5071)
@@ -39,7 +39,7 @@
            (doto
              (Thread. ^Runnable (fn []
                                   (loop [action-timestamps {}]
-                                    (Thread/sleep sleep-interval)
+                                    (Thread/sleep ^long sleep-interval)
                                     (recur (perform-step action-timestamps))))
                       "Memento Daemon")
              (.setDaemon true)
