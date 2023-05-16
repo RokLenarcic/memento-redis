@@ -5,17 +5,20 @@
 
   There are longer, rarer jobs to do:
   - maintain expiry of load markers (generally about each second)
-  - secondary indexes cleanup (generally every 5 seconds)"
+  - secondary indexes cleanup (generally every 4 seconds)"
   (:require [memento.redis.loader :as loader]
             [memento.redis.sec-index :as sec-index]
             [taoensso.timbre :as log]))
 
 (def sleep-interval
   "Time in ms between thread wakeups."
-  (Long/parseLong (System/getProperty "memento.redis.daemon_interval" "50")))
+  (Long/parseLong (System/getProperty "memento.redis.daemon_interval" "40")))
 
 (def load-markers-interval 1000)
-(def sec-index-interval 5071)
+(def sec-index-interval
+  "Time in ms to perform secondary index cleanups (removes entries pointing to
+  non-existent keys)"
+  (Long/parseLong (System/getProperty "memento.redis.sec_index_interval" "4071")))
 
 (defn perform-step
   "Perform maintenance steps, given a map of last time each type was done."

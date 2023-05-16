@@ -189,8 +189,22 @@ connections and/or key generators, you need multiple call with the correct funct
 This library uses `future` and you might need to call `shutdown-agents` to
 make JVM shutdown promptly.
 
+## Customizing Daemon thread intervals
+
+Memento has a thread that maintains JVM local state by polling Redis. This is so the loads done by other instances
+can be finalized, locks maintained and secondary index maintained.
+
+1. Every 40ms Redis is checked for any foreign loads that this instance is waiting on. This can be adjusted by
+system property `memento.redis.daemon_interval`.
+
+2. Every 1000ms Memento refreshes load locks for loads ongoing, if the lock is not maintained 
+for 5 seconds (or as specified by system property `memento.redis.load_marker_fade` in seconds), then lock is dropped
+
+3. Every 4000ms Memento will perform cleanup of secondary indexes, removing entries from indexes that point to
+keys that no longer exist. This interval can be adjusted by system property `memento.redis.sec_index_interval`.
+
 ## License
 
-Copyright © 2021 Rok Lenarčič
+Copyright © 2021-2023 Rok Lenarčič
 
-Licensed under the term of the Eclipse Public License - v 2.0, see LICENSE.
+Licensed under the term of the MIT License, see LICENSE.
