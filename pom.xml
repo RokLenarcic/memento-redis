@@ -6,16 +6,29 @@
   <artifactId>memento-redis</artifactId>
   <version>0.1.1</version>
   <name>memento-redis</name>
+  <description>A memento cache using Redis</description>
+  <url>https://github.com/RokLenarcic/memento-redis</url>
+  <licenses>
+    <license>
+      <name>MIT</name>
+      <url>https://github.com/RokLenarcic/memento-redis/blob/master/LICENSE</url>
+    </license>
+  </licenses>
+  <scm>
+    <url>https://github.com/RokLenarcic/memento-redis</url>
+    <connection>scm:git:git://github.com/RokLenarcic/memento-redis.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/RokLenarcic/memento-redis.git</developerConnection>
+  </scm>
   <dependencies>
     <dependency>
       <groupId>org.clojure</groupId>
       <artifactId>clojure</artifactId>
-      <version>1.10.1</version>
+      <version>1.11.1</version>
     </dependency>
     <dependency>
       <groupId>org.clojars.roklenarcic</groupId>
       <artifactId>memento</artifactId>
-      <version>0.9.6</version>
+      <version>1.1.49</version>
     </dependency>
     <dependency>
       <groupId>com.taoensso</groupId>
