@@ -9,8 +9,13 @@
     [memento.redis.sec-index :as sec-index]
     [memento.redis.util :as util]
     [taoensso.carmine :as car])
-  (:import (clojure.lang AFn IDeref)
+  (:import (clojure.lang AFn IDeref IObj)
            (memento.base EntryMeta ICache Segment)))
+
+(defn wrap-hits [conf obj hit?]
+  (if (and (:memento.redis/hit-detect? conf) (instance? IObj obj))
+    (vary-meta obj assoc :memento.redis/cached? hit?)
+    obj))
 
 (defrecord RedisCache [conf fns cname ttl-ms fade-ms lookup]
   ICache
@@ -23,12 +28,12 @@
         (let [ret @maintenance-data]
           (if (= ret b/absent)                              ; failed load
             (recur segment args)
-            ret))
+            (wrap-hits conf ret true)))
         (try
           (let [f (if ret-fn (fn [& args] (ret-fn args (apply (.getF ^Segment segment) args)))
                              (.getF ^Segment segment))
                 calculated (AFn/applyToHelper f args)]
-            (loader/complete lookup c k calculated))
+            (wrap-hits conf (loader/complete lookup c k calculated) false))
           (catch Exception e
             (loader/complete lookup c k (c/do-not-cache b/absent))
             (throw e))))))

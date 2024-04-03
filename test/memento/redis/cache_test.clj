@@ -78,6 +78,7 @@
       (is (memoized? mine))
       (is (not (memoized? them)))
       (is (= 42 (mine 42)))
+      (is (= nil (meta (mine {}))))
       (is (not (empty? (into {} (as-map mine)))))
       (is (memo-clear! mine))
       (is (empty? (into {} (as-map mine))))))
@@ -220,3 +221,15 @@
     (f 1)
     (f 1)
     (is (= 2 @access-count))))
+
+(deftest hit-miss-check
+  (let [f (memo identity (assoc inf mr/hit-detect? true))]
+    (testing "That hits and misses are recorded"
+      (are [in m]
+        (= m (meta (f in)))
+        [1] #:memento.redis{:cached? false}
+        [2] #:memento.redis{:cached? false}
+        [1] #:memento.redis{:cached? true}
+        [2] #:memento.redis{:cached? true}
+        1 nil
+        nil nil))))

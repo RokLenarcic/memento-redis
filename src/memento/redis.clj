@@ -100,3 +100,8 @@
        (nuke!! (-> cache :fns :conn) (-> cache :fns :keygen)))))
   ([conn keys-generator]
    (util/nuke-keyspace ((cache/conf-conn {::conn conn})) keys-generator)))
+
+(def hit-detect?
+  "Cache setting, if set to true, any time there's a cache miss and an IObj is returned, it will have
+  meta key :memento.redis/cached? with value true/false"
+  ::hit-detect?)
