@@ -19,8 +19,8 @@
 
 (defn invalidate-by-index
   "Remove (invalidate) secondary index and all the keys therein"
-  [conn indexes-key id-key]
-  (car/wcar conn (car/lua invalidate-script {:id-key id-key :indexes indexes-key} {})))
+  [conn indexes-key id-keys]
+  (car/wcar conn (car/lua invalidate-script (cons indexes-key id-keys) {})))
 
 ;; SECONDARY INDEX MAINTENANCE
 (def clean-up-script (slurp (io/resource "memento/redis/clean-up-expired.lua")))

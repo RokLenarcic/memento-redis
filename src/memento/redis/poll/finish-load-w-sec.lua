@@ -15,4 +15,6 @@ if '' == _:load-marker or redis.call('get', k) == _:load-marker then
     redis.call('sadd', KEYS[i], k)
     redis.call('sadd', indexes, KEYS[i])
   end
+  return 1;
 end
+return 0;

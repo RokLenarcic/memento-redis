@@ -55,12 +55,12 @@
         (conn)
         (keys/cache-wildcard-key keygen cname))
       this))
-  (invalidateId [this id]
+  (invalidateIds [this ids]
     (let [{:keys [conn keygen]} fns]
       (sec-index/invalidate-by-index
         (conn)
         (keys/sec-indexes-key keygen)
-        (keys/sec-index-id-key keygen cname id))
+        (mapv #(keys/sec-index-id-key keygen cname %) ids))
       this))
   (addEntries [this segment args-to-vals]
     (when (seq args-to-vals)

@@ -1,10 +1,12 @@
 (ns memento.redis.sec-index-test
   (:require [clojure.test :refer :all]
+            [memento.config :as mc]
             [memento.core :as m]
             [memento.redis.keys :as keys]
             [memento.redis.loader :as loader]
             [memento.redis.sec-index :as sec-idx]
             [memento.redis.test-util :as util]
+            [memento.redis.cache-test :as cache-test]
             [taoensso.carmine :as car])
   (:import (java.util.concurrent ConcurrentHashMap)))
 
@@ -33,7 +35,11 @@
         id-key (keys/sec-index-id-key util/test-keygen "A" "B")
         indexes-key (keys/sec-indexes-key util/test-keygen)]
     (car/wcar {} (add-to-index indexes-key id-key k))
-    (sec-idx/invalidate-by-index {} indexes-key id-key)
+    (is (= 1 (car/wcar {} (car/exists k))))
+    (is (= 1 (car/wcar {} (car/exists indexes-key))))
+    (is (= ['("MMRS-TEST" "A" "B")] (car/wcar {} (car/smembers indexes-key))))
+    (is (= 1 (car/wcar {} (car/exists id-key))))
+    (sec-idx/invalidate-by-index {} indexes-key [id-key])
     (is (= 0 (car/wcar {} (car/exists k))))
     (is (= 0 (car/wcar {} (car/exists indexes-key))))
     (is (= [] (car/wcar {} (car/smembers indexes-key))))
@@ -62,3 +68,17 @@
     (sec-idx/removed-expired-keys {} (keys/sec-indexes-key util/test-keygen))
     (sec-idx/removed-expired-keys {} (keys/sec-indexes-key util/test-keygen))
     (is (= #{} (into #{} (car/wcar {} (car/smembers (keys/sec-indexes-key util/test-keygen))))))))
+
+(defn test-fn [x] x)
+
+(m/memo test-fn (assoc cache-test/inf mc/tags #{:test-tag}))
+
+(deftest put-test
+  (let [f (m/memo inc (assoc cache-test/inf mc/tags #{:test-tag}))
+        id-key (keys/sec-index-id-key util/test-keygen "" [:test-tag 55])
+        indexes-key (keys/sec-indexes-key util/test-keygen)]
+    (m/memo-add! f {[1] (m/with-tag-id 100 :test-tag 55)})
+    (is (= {[1] 100} (m/as-map f)))
+    (is (= 100 (util/get-entry* f [1])))
+    (is (= ['("MMRS-TEST" "" [:test-tag 55])] (car/wcar {} (car/smembers indexes-key))))
+    (is (= 1 (car/wcar {} (car/exists id-key))))))

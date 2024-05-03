@@ -253,7 +253,7 @@
       (try
         (car/wcar conn
           (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
-          (when tag-idents (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true)))
+          (when (seq tag-idents) (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true)))
         (catch Exception e
           (log/warn e "Error putting value to Redis for key " k)))
       nil)))

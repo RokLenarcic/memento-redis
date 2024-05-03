@@ -4,7 +4,13 @@ Memento cache backed by Redis. The underlying library is Carmine (refer to their
 
 Offers **guarantees that a cache entry is calculated only once even if using multiple JVMs**.
 
-Version 0.2.x works with Memento 1.1.x, version 0.1.x works with Memento 1.0.x. 
+Memento version compatibility
+
+| Memento | Memento Redis |
+|---------|---------------|
+| 1.2.x   | 0.3.x         |
+| 1.1.x   | 0.2.x         |
+| 1.0.x   | 0.1.x         |
 
 ## Dependency
 

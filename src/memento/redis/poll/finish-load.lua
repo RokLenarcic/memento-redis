@@ -6,4 +6,6 @@ if redis.call('get', _:k) == _:load-marker then
   else
     redis.call('set', _:k, _:v)
   end
+  return 1;
 end
+return 0;
