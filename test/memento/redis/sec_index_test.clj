@@ -4,11 +4,14 @@
             [memento.core :as m]
             [memento.redis.keys :as keys]
             [memento.redis.loader :as loader]
+            [memento.redis.poll.daemon :as daemon]
             [memento.redis.sec-index :as sec-idx]
             [memento.redis.test-util :as util]
             [memento.redis.cache-test :as cache-test]
             [taoensso.carmine :as car])
-  (:import (java.util.concurrent ConcurrentHashMap)))
+  (:import (java.util.concurrent ConcurrentHashMap)
+           (memento.base Segment)
+           (memento.redis.poll Loader Loads)))
 
 (use-fixtures :each util/fixture-wipe)
 
@@ -47,18 +50,18 @@
 
 (deftest removed-expired-keys-test
   (let [l (ConcurrentHashMap.)
-        loader (loader/->PollingLoader l util/test-keygen "" 1 1)
+        loader (Loader. "" util/test-keygen nil nil [1 :ms] [1 :ms] nil false l loader/support)
+        segment (Segment. #(-> %
+                               (m/with-tag-id :y %)
+                               (m/with-tag-id :t (str "W" %)))
+                          #(str "T" %)
+                          "IDDD"
+                          {})
         entry-key #(util/test-key (str "T" %))
         index-key1 #(keys/sec-index-id-key util/test-keygen "" [:y %])
         index-key2 #(keys/sec-index-id-key util/test-keygen "" [:t (str "W" %)])]
     (doseq [x (range 1000)]
-      (loader/start loader {} (entry-key x))
-      (loader/complete loader
-                       {}
-                       (entry-key x)
-                       (-> x
-                           (m/with-tag-id :y x)
-                           (m/with-tag-id :t (str "W" x)))))
+      (.get loader {} segment (list x) (entry-key x)))
     (is (= (into #{} (concat
                        (map index-key1 (range 1000))
                        (map index-key2 (range 1000))))

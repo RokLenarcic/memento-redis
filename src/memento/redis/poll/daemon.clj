@@ -8,7 +8,8 @@
   - secondary indexes cleanup (generally every 4 seconds)"
   (:require [memento.redis.loader :as loader]
             [memento.redis.sec-index :as sec-index]
-            [taoensso.timbre :as log]))
+            [taoensso.timbre :as log])
+  (:import (memento.redis.poll Loads)))
 
 (def sleep-interval
   "Time in ms between thread wakeups."
@@ -29,7 +30,7 @@
         new-timestamps (cond-> action-timestamps
                          load-markers? (assoc :load-markers current :sec-index current))]
     (try
-      (loader/maintenance-step loader/maint load-markers?)
+      (loader/maintenance-step Loads/maint load-markers?)
       (when sec-index?
         (sec-index/maintenance-step sec-index/all-indexes))
       new-timestamps

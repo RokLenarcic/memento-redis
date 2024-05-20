@@ -64,9 +64,13 @@
   "Generates keys to be used when working with Redis."
   (cache-wildcard-key [this cache-name]
     "A wildcard (glob) key that will return all keys used by a particular cache.")
+  (cache-key? [this cache-name k]
+    "Returns true if key belongs to the named cache")
   (segment-wildcard-key [this cache-name segment]
     "A wildcard (glob) key that will return all keys used by a particular memoized
     function. Segment is memento.base.Segment.")
+  (segment-key? [this cache-name segment k]
+    "Returns true if key belongs to the Segment")
   (entry-key [this cache-name segment args-key]
     "A concrete key for an entry. Segment is memento.base.Segment.")
   (sec-index-id-key [this cache-name id]
@@ -86,8 +90,14 @@
     (reify KeysGenerator
       (cache-wildcard-key [this cache-name]
         (wildcard (list memento-space-prefix cache-name)))
+      (cache-key? [this cache-name k]
+        (let [[prefix n] k]
+          (and (= prefix memento-space-prefix) (= n cache-name))))
       (segment-wildcard-key [this cache-name segment]
         (wildcard (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)))))
+      (segment-key? [this cache-name segment k]
+        (let [[prefix n segment-id] k]
+          (and (= prefix memento-space-prefix) (= n cache-name) (= segment-id (segment-id-fn (.getId ^Segment segment))))))
       (entry-key [this cache-name segment args-key]
         (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)) args-key))
       (sec-index-id-key [this cache-name id]

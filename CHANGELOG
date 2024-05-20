@@ -1,3 +1,12 @@
+#### 0.4.xx
+
+- complete rewrite of loader in Java
+- fixes issues with concurrent access to same keys triggering multiple Redis accesses, important concurrency fixes
+- if an exception is thrown by the cached function, all threads awaiting the same key will get the same exception at once, before each thread would attempt to call the function serially
+- specify per entry TTL with `:memento.redis/ttl-fn`
+- specify expiry on function bind instead of cache
+- invalidations during the load will cause value to be recalculated
+
 #### 0.3.21
 
 - add compatibility with Memento 1.2.x

@@ -7,8 +7,9 @@
             [taoensso.carmine :as car])
   (:import (java.util ArrayList)
            (java.util.concurrent ConcurrentHashMap)
+           (memento.base Segment)
            (memento.redis.loader LoadMarker)
-           (clojure.lang IDeref)))
+           (memento.redis.poll Load Loader)))
 
 (use-fixtures :each util/fixture-wipe)
 
@@ -74,124 +75,121 @@
     (util/add-entry "A" (loader/new-load-marker))
     (util/add-entry "B" (loader/new-load-marker))
     (.put l {} submap)
-    (.put submap (util/test-key "A") {:marker true
-                                      :result (promise)})
-    (.put submap (util/test-key "B") {:result (promise)})
+    (.put submap (util/test-key "A") (Load. (loader/new-load-marker)))
+    (.put submap (util/test-key "B") (Load. nil))
     (loader/remove-load-markers l)
     (is (.isEmpty l))
     (is (nil? (util/get-entry "A")))
     (is (some? (util/get-entry "B")))))
 
-(deftest update-maint-test
-  (let [l (ConcurrentHashMap.)]
-    (is (= :y (loader/update-maint l :x "A" (fn [_ cb] (cb :y) "A"))))
-    (is (= {:x {"A" "A"}} l))
-    (loader/update-maint l :x "A" (constantly nil))
-    (is (= {:x {}} l))))
-
 (defn create-loader
   "local-maker is boolean
    marker can be :none :our :their, which describes which marker is in the DB
 
-   returns PollingLoader"
-  ([] (loader/->PollingLoader (ConcurrentHashMap.) util/test-keygen "" nil nil))
+   returns Loader"
+  ([] (Loader. "" util/test-keygen nil nil nil nil nil false (ConcurrentHashMap.) loader/support))
   ([k local-marker? marker]
    (create-loader k local-marker? marker nil nil))
   ([k local-marker? marker ttl-ms fade-ms]
-   (let [l (ConcurrentHashMap.)
-         load-marker (loader/new-load-marker)
-         entry {:result (promise) :marker (when local-marker? load-marker)}]
-     (loader/update-maint l {} (util/test-key k) (constantly entry))
+   (let [load-marker (loader/new-load-marker)
+         loader (Loader. "" util/test-keygen nil nil (when ttl-ms [ttl-ms :ms]) (when fade-ms [fade-ms :ms]) nil false (ConcurrentHashMap.) loader/support)
+         entry (Load. (when local-marker? load-marker))]
+     (.put (.connMap loader {}) (util/test-key k) entry)
      (case marker
        :none nil
        :our (util/add-entry k load-marker)
        :their (util/add-entry k (loader/new-load-marker)))
-     (loader/->PollingLoader l util/test-keygen "" ttl-ms fade-ms))))
+     loader)))
 
-(defn complete-with [loader v]
-  (let [k (-> loader :maint-map first val first key)
-        p (get-in loader [:maint-map {} k :result])
-        _ (loader/complete loader {} k v)
-        redis-val (car/wcar {} (car/get k))]
-    [k p redis-val]))
+(defn load-for [^Loader loader k] (get-in (.getMaint loader) [{} (util/test-key k)]))
+
+(defn start-load [loader k]
+  (let [p (promise)
+        s (Segment. (fn [] (deref p 10000 :timeout)) nil "" {})
+        ret (future (.get loader {} s nil (util/test-key k)))]
+    (Thread/sleep 200)
+    [p ret (util/get-entry k) (load-for loader k)]))
+
+(defn deliver-val [loader start k v]
+  (deliver (first start) v)
+  [(deref (second start) 1000 :deliver-timeout) (util/get-entry k) (load-for loader k)])
+
+(deftest lookup-test
+  (testing "if no entry and nothing in redis, create and return maintenance entry"
+    (let [l (create-loader)
+          [p ret redis-val load :as start] (start-load l :x1)]
+      (is (= (.getLoadMarker load) redis-val))
+      (is (not (realized? ret)))
+      (deliver p nil)))
+  (testing "if no entry and there's a load marker there, have load that is awaiting"
+    (let [l (create-loader)
+          marker (loader/new-load-marker)
+          _ (util/add-entry :x2 marker)
+          [p ret redis-val load] (start-load l :x2)]
+      (is (= nil (.getLoadMarker load)))
+      (is (instance? LoadMarker redis-val))
+      (is (not (realized? ret)))
+      (util/add-entry :x2 "10")
+      (loader/maintenance-step (.getMaint l) false)
+      (is (= "10" (deref ret 5000 :timeout)))))
+  (testing "if no entry and there's a value there, return value without any load there"
+    (let [l (create-loader)
+          _ (util/add-entry :x3 "55")
+          [p ret redis-val load] (start-load l :x3)]
+      (is (realized? ret))
+      (is (= nil load))
+      (is (= "55" (deref ret 5000 :timeout))))))
 
 (deftest complete-test
-  (testing "leave alone non-remote load"
+  (testing "leave alone non-remote load, await foreign load"
     (let [l (create-loader "A" false :none)
-          [k p redis-val] (complete-with l :some)]
+          [_ _ redis-val load :as start] (start-load l "A")
+          [ret redis-after load-after] (deliver-val l start "A" :some)
+          ]
       (is (= nil redis-val))
-      (is (= :none (deref p 1 :none)))
-      (is (some? (get-in l [:maint-map {} k])))))
+      (is (= nil (.getLoadMarker load)))
+      ;; we were awaiting another thread load
+      (is (= :deliver-timeout ret))
+      (is (= nil (.getLoadMarker load-after)))
+      (is (= nil redis-after))))
   (testing "our load, finish with non-cache"
     ;; our load, should delete redis marker and deliver local
-    (let [l (create-loader "B" true :our)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (= nil redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
+    (let [l (create-loader)
+          [_ _ redis-val load :as start] (start-load l "B")
+          [ret redis-after load-after] (deliver-val l start "B" (c/do-not-cache :some))]
+      (is (= (.getLoadMarker load) redis-val))
+      ;;
+      (is (= :some ret))
+      (is (= nil redis-after))
+      (is (= nil load-after))))
   (testing "our load, finish with val"
     ;; our load, should delete redis marker and deliver local
-    (let [l (create-loader "B" true :our)
-          [k p redis-val] (complete-with l :some)]
-      (is (= :some redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
-  (testing "their load, finish with non-cache"
-    ;; their load, should just deliver promise locally and delete maintenance
-    ;; leave their token up
-    (let [l (create-loader "C" true :their)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (instance? LoadMarker redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
-  (testing "their load, finish with val"
-    ;; their load, should just deliver promise locally and delete maintenance
-    ;; leave their token up
-    (let [l (create-loader "C" true :their)
-          [k p redis-val] (complete-with l :some)]
-      (is (instance? LoadMarker redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
-  (testing "total disconnect, foreign load, finish with non-cache"
-    (let [l (create-loader "D" false :their)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (instance? LoadMarker redis-val))
-      (is (= :none (deref p 1 :none)))
-      (is (some? (get-in l [:maint-map {} k])))))
-  (testing "total disconnect, foreign load, finish with val"
-    (let [l (create-loader "D" false :their)
-          [k p redis-val] (complete-with l :some)]
-      (is (instance? LoadMarker redis-val))
-      (is (= :none (deref p 1 :none)))
-      (is (some? (get-in l [:maint-map {} k])))))
+    (let [l (create-loader)
+          [_ _ redis-val load :as start] (start-load l "B")
+          [ret redis-after load-after] (deliver-val l start "B" :some)]
+      (is (= (.getLoadMarker load) redis-val))
+      ;;
+      (is (= :some ret))
+      (is (= :some redis-after))
+      (is (= nil load-after))))
   (testing "our load, marker has expired, finish with non-cache"
-    (let [l (create-loader "E" true :none)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (= nil redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
+    (let [l (create-loader)
+          [_ _ redis-val load :as start] (start-load l "C")
+          _ (car/wcar {} (car/del (util/test-key "C")))
+          [ret redis-after load-after] (deliver-val l start "C" (c/do-not-cache :some))]
+      (is (= redis-val (.getLoadMarker load)))
+      (is (= nil redis-after))
+      (is (= :some ret))
+      (is (= nil load-after))))
   (testing "our load, marker has expired, finish with val"
-    (let [l (create-loader "E" true :none)
-          [k p redis-val] (complete-with l :some)]
-      (is (= nil redis-val))
-      (is (= :some (deref p 1 :none)))
-      (is (= {{} {}} (:maint-map l)))))
-  (testing "no load locally, but our marker, finish with non-cache"
-    ;; we have a marker in the database, but for some reason not locally,
-    ;; we're not handling this case, nothing is touched
-    (let [l (create-loader "F" false :our)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (instance? LoadMarker redis-val))
-      (is (= :none (deref p 1 :none)))
-      (is (some? (get-in l [:maint-map {} k])))))
-  (testing "no load locally, but our marker, finish with val"
-    ;; we have a marker in the database, but for some reason not locally,
-    ;; we're not handling this case, nothing is touched
-    (let [l (create-loader "F" false :our)
-          [k p redis-val] (complete-with l (c/do-not-cache :some))]
-      (is (instance? LoadMarker redis-val))
-      (is (= :none (deref p 1 :none)))
-      (is (some? (get-in l [:maint-map {} k]))))))
+    (let [l (create-loader)
+          [_ _ redis-val load :as start] (start-load l "C")
+          _ (car/wcar {} (car/del (util/test-key "C")))
+          [ret redis-after load-after] (deliver-val l start "C" :some)]
+      (is (= redis-val (.getLoadMarker load)))
+      (is (= nil redis-after))
+      (is (= :some ret))
+      (is (= nil load-after)))))
 
 (deftest fetch-test
   (testing "load marker is set if not there"
@@ -242,52 +240,19 @@
       (is (= v nil))
       (is (= nil (util/get-entry "missing"))))))
 
-(deftest lookup-test
-  (testing "if entry is there always return that promise"
-    (are [k local-marker? redis-marker]
-      (let [l (create-loader k local-marker? redis-marker)]
-        (is (instance? IDeref (loader/start l {} (util/test-key k)))))
-      :a true :none
-      :b false :none
-      :c true :our
-      :d false :our
-      :e true :their
-      :f true :their))
-  (testing "if no entry and nothing in redis, create and return maintenance entry"
-    (let [l (create-loader)
-          ret (loader/start l {} (util/test-key :x1))]
-      (is (nil? ret))
-      (is (= (get-in l [:maint-map {} (util/test-key :x1) :marker] ret) (util/get-entry :x1)))
-      (is (not (realized? (get-in l [:maint-map {} (util/test-key :x1) :result] ret))))))
-  (testing "if no entry and there's a load marker there, create and return maintenance without
-  the load marker"
-    (let [l (create-loader)
-          marker (loader/new-load-marker)
-          _ (util/add-entry :x2 marker)
-          ret (loader/start l {} (util/test-key :x2))]
-      (is (instance? IDeref ret))
-      (is (not (realized? ret)))))
-  (testing "if no entry and there's a value there, create and return maintenance without
-  the load marker"
-    (let [l (create-loader)
-          _ (util/add-entry :x3 "55")
-          ret (loader/start l {} (util/test-key :x3))]
-      (is (instance? IDeref ret))
-      (is (= "55" @ret)))))
-
 (deftest maintenance-step-test
   (testing "Fetching results, returning b/absent"
     (let [l (create-loader :a false :none)
-          p (get-in l [:maint-map {} (util/test-key :a) :result])]
-      (is (not (realized? p)))
-      (loader/maintenance-step (:maint-map l) false)
-      (is (= b/absent (deref p 1 :x)))
-      (is (= {{} {}} (:maint-map l)))))
+          p (-> (.getMaint l) (.get {}) (.get (util/test-key :a)) (.getPromise))]
+      (is (= b/absent (.getNow p)))
+      (loader/maintenance-step (.getMaint l) false)
+      (is (= b/absent (.await p :a)))
+      (is (= {{} {}} (.getMaint l)))))
   (testing "Fetching results"
     (let [l (create-loader :a false :none)
           _ (util/add-entry :a true)
-          p (get-in l [:maint-map {} (util/test-key :a) :result])]
-      (is (not (realized? p)))
-      (loader/maintenance-step (:maint-map l) false)
-      (is (= true (deref p 1 :x)))
-      (is (= {{} {}} (:maint-map l))))))
+          p (-> (.getMaint l) (.get {}) (.get (util/test-key :a)) (.getPromise))]
+      (is (= b/absent (.getNow p)))
+      (loader/maintenance-step (.getMaint l) false)
+      (is (= true (.await p :a)))
+      (is (= {{} {}} (.getMaint l))))))

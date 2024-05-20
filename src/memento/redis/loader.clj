@@ -1,18 +1,19 @@
 (ns memento.redis.loader
   (:require [clojure.java.io :as io]
             [memento.base :as b]
+            [memento.config :as mc]
             [memento.redis.sec-index :as sec-index]
             [memento.redis.keys :as keys]
             [taoensso.nippy :as nippy]
             [taoensso.nippy.tools :as nippy-tools]
-            [taoensso.carmine :as car]
-            [taoensso.timbre :as log])
+            [taoensso.carmine :as car])
   (:import (java.io DataInput DataOutput)
            (memento.base EntryMeta)
            (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiFunction BiConsumer)
            (clojure.lang Keyword)
-           (java.util ArrayList List UUID)))
+           (java.util ArrayList List UUID)
+           (memento.redis.poll Load Loader LoaderSupport Loads)))
 
 (nippy/extend-freeze EntryMeta ::b/entry-meta [^EntryMeta x data-output]
                      (nippy/-freeze-with-meta! (.getV x) data-output)
@@ -44,34 +45,6 @@
     Number (nippy-tools/wrap-for-freezing v)
     Keyword (nippy-tools/wrap-for-freezing v)
     v))
-
-(def ^ConcurrentHashMap maint
-  "Map of conn to map of key to promise.
-
-  For each connection the submap contains Redis keys to a map of:
-  - :result (a promise)
-  - :marker (a load marker)
-
-  If marker is present, then it's our load and we must deliver to redis.
-  If not, a foreign JVM is going to deliver to Redis, and we must scan redis for it."
-  (ConcurrentHashMap. (int 4) (float 0.75) (int 8)))
-
-(defn update-maint
-  "Updates maintenance map with f. The return of the function replaces the
-  entry in the maintenance map, but the function also receives a callback
-  which you can call with a value and that value will be the return of the
-  update-maint function. Otherwise the return is nil.
-
-  f is a function of (fn [prev-val ret-callback])"
-  [^ConcurrentHashMap maint-map conn k f]
-  (let [ret (volatile! nil)
-        up (reify BiFunction (apply [this k v] (f v #(vreset! ret %))))
-        update-loads (reify BiFunction
-                       (apply [this conn loads]
-                         (let [^ConcurrentHashMap m (or loads (ConcurrentHashMap. (int 16) (float 0.75) (int 8)))]
-                           (doto m (.compute k up)))))]
-    (.compute maint-map conn update-loads)
-    @ret))
 
 (def cached-entries-script (slurp (io/resource "memento/redis/poll/cached-entries.lua")))
 (def refresh-load-markers-script (slurp (io/resource "memento/redis/poll/refresh-load-markers.lua")))
@@ -110,8 +83,8 @@
         load-markers (ArrayList.)
         upstream-entries (ArrayList.)
         extractor (reify BiConsumer
-                    (accept [this k {:keys [marker]}]
-                      (if marker
+                    (accept [this k load]
+                      (if-let [marker (.getLoadMarker ^Load load)]
                         (when refresh-load-markers?
                           (.add load-marker-keys k)
                           (.add load-markers marker))
@@ -119,11 +92,12 @@
     (.forEach loads-map extractor)
     (when refresh-load-markers?
       (refresh-load-markers conn load-marker-keys load-markers load-marker-fade-sec))
-    (doseq [[k v] (cached-entries conn upstream-entries)]
-      (.computeIfPresent loads-map k (reify BiFunction
-                                       (apply [this k {:keys [result]}]
-                                         (deliver result v)
-                                         nil))))))
+    (doseq [[k v] (cached-entries conn upstream-entries)
+            :let [^Load load (.remove loads-map k)]]
+      (when load
+        (let [p (.getPromise load)]
+          (.deliver p v)
+          (.releaseResult p))))))
 
 (defn maintenance-step
   "Perform maintenance multithreaded, one future per each connection after the first."
@@ -157,7 +131,7 @@
               (accept [this conn m]
                 (car/wcar conn
                   (apply car/del
-                         (reduce #(if (:marker (val %2)) (conj %1 (key %2)) %1) '() m))))))
+                         (reduce-kv (fn [l k ^Load v] (if (.getLoadMarker v) (conj l k) l)) '() m))))))
   (.clear maint-map))
 
 ;;;; END maintenance utilities
@@ -187,90 +161,35 @@
 (def finish-load-script (slurp (io/resource "memento/redis/poll/finish-load.lua")))
 (def bulk-set (slurp (io/resource "memento/redis/poll/bulk-set.lua")))
 
-(defprotocol Loader
-  "A loader for the specific Cache"
-  (start [this conn k]
-    "Returns either an IDeref that returns the value of the entry, or nil if the entry is not
-    being cached or calculated. It can be assumed that we claimed a load marker if nil was returned.")
-  (complete [this conn k v]
-    "Finishes a load with the given value, giving the entry the desired expire.")
-  (put [this conn k v]
-    "Pushes an entry into cache, ignoring any loading mechanism and locks."))
+(def support
+  (reify LoaderSupport
+    (newLoadMarker [this] (new-load-marker))
+    (isLoadMarker [this o] (instance? LoadMarker o))
+    (fetchEntry [this conn k load-marker load-ms fade-ms]
+      (fetch conn k load-marker load-ms fade-ms))
+    (completeLoad [this conn key-list v load-marker expire]
+      (let [values {:load-marker load-marker :v (cval v) :ttl-ms (or expire -1)}]
+        (if (= 1 (count key-list))
+          (= 1 (car/wcar conn (car/lua finish-load-script {:k (first key-list)} values)))
+          (let [ret (= 1 (car/wcar conn (car/lua sec-index/finish-load-script key-list values)))]
+            (.put sec-index/all-indexes [conn (second key-list)] true)
+            ret))))
+    (abandonLoad [this conn key load-marker]
+      (car/wcar conn
+        (car/lua abandon-load-script {:k key} {:load-marker load-marker})))
+    (completeLoadKeys [this cname kg k tag-idents]
+      (if (seq tag-idents)
+        (sec-index/keys-param-for-sec-idx kg k cname tag-idents)
+        [k]))))
 
-(defrecord PollingLoader [maint-map kg cname ttl-ms fade-ms]
-  Loader
-  (start [this conn k]
-    (update-maint
-      maint-map conn k
-      (fn [entry ret-cb]
-        (if entry
-          ;; we're already waiting or calculating the entry, just return promise.
-          (do (ret-cb (:result entry)) entry)
-          (let [marker (new-load-marker)
-                ;; no entry in maintenance map, let's try to claim it
-                [present? cached-val] (fetch conn k marker (* 1000 load-marker-fade-sec) fade-ms)]
-            (if present?
-              (if (instance? LoadMarker cached-val)
-                ;; someone else has a load marker, make a promise that awaits that, store it in maintenance app
-                {:result (doto (promise) ret-cb)}
-                ;; there's a cached value, wrap it in volatile and return nil, so no entry in maintenance map is
-                ;; created
-                (do (ret-cb (volatile! cached-val)) nil))
-              ;; we've claimed the load
-              {:result (promise) :marker marker}))))))
-  (complete [this conn k v]
-    (update-maint
-      maint-map conn k
-      (fn [entry ret-cb]
-        (if-let [marker (:marker entry)]
-          (let [entry-meta? (instance? EntryMeta v)
-                unw-v (if entry-meta? (.getV ^EntryMeta v) v)
-                values {:load-marker marker :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
-                tag-idents (when entry-meta? (seq (.getTagIdents ^EntryMeta v)))]
-            (try
-              (car/wcar conn
-                (cond
-                  (and entry-meta? (.isNoCache ^EntryMeta v))
-                  (car/lua abandon-load-script {:k k} (select-keys values [:load-marker]))
-
-                  (seq tag-idents)
-                  (do (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
-                      (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true))
-
-                  :else
-                  (car/lua finish-load-script {:k k} values)))
-              (catch Exception e
-                (log/warn e "Error completing load to Redis for key " k)))
-            (deliver (:result entry) unw-v)
-            (ret-cb unw-v)
-            nil)
-          entry))))
-  (put [this conn k v]
-    (let [unw-v (b/unwrap-meta v)
-          ;; don't use marker
-          values {:load-marker "" :v (cval unw-v) :ttl-ms (or ttl-ms fade-ms -1)}
-          tag-idents (when (instance? EntryMeta v) (.getTagIdents ^EntryMeta v))]
-      (try
-        (car/wcar conn
-          (car/lua sec-index/finish-load-script (sec-index/keys-param-for-sec-idx kg k cname tag-idents) values)
-          (when (seq tag-idents) (.put sec-index/all-indexes [conn (keys/sec-indexes-key kg)] true)))
-        (catch Exception e
-          (log/warn e "Error putting value to Redis for key " k)))
-      nil)))
-
-(defn if-cached
-  "Retrieves an entry from redis, doing no loading at all, returning b/absent if there is no
-  entry there."
-  [conn k fade-ms]
-  (let [[present? v] (fetch conn k (new-load-marker) -1 fade-ms)]
-    (if (and present? (not (instance? LoadMarker v))) v b/absent)))
-
-(defn for-cache
-  "Return loader for RedisCache"
-  [redis-cache]
-  (->PollingLoader
-    maint
-    (-> redis-cache :fns :keygen)
-    (:cname redis-cache)
-    (:ttl-ms redis-cache)
-    (:fade-ms redis-cache)))
+(defn for-conf [conf keygen]
+  (Loader. (:memento.redis/name conf "")
+           keygen
+           (mc/ret-fn conf)
+           (mc/ret-ex-fn conf)
+           (mc/ttl conf)
+           (mc/fade conf)
+           (:memento.redis/ttl-fn conf)
+           (:memento.redis/hit-detect? conf false)
+           Loads/maint
+           support))

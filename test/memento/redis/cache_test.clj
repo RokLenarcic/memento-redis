@@ -41,10 +41,10 @@
 (deftest conf-key-fn-test
   (are [conf segment result]
     (is (= result ((cache/conf-key-fn (cache/conf-keygen {}) conf) segment [10])))
-    {} (Segment. identity identity :id) (list "M^" "" :id [10])
-    {mr/name "cache-name"} (Segment. identity identity :id) (list "M^" "cache-name" :id [10])
-    {mc/key-fn (comp inc first)} (Segment. identity identity :id) (list "M^" "" :id 11)
-    {mc/key-fn inc} (Segment. identity (comp #(* 2 %) first) :id) (list "M^" "" :id 21)))
+    {} (Segment. identity identity :id {}) (list "M^" "" :id [10])
+    {mr/name "cache-name"} (Segment. identity identity :id {}) (list "M^" "cache-name" :id [10])
+    {mc/key-fn (comp inc first)} (Segment. identity identity :id {}) (list "M^" "" :id 11)
+    {mc/key-fn inc} (Segment. identity (comp #(* 2 %) first) :id {}) (list "M^" "" :id 21)))
 
 (deftest as-map-test
   (let [memod (memo inc inf)]
@@ -173,10 +173,6 @@
       (is (= 3 (b/if-cached (active-cache f) (.segment f) (seq [2]))))
       (is (= b/absent (b/if-cached (active-cache f) (.segment f) (seq [5])))))))
 
-(deftest conf-millis-test
-  (is (= 3000 (cache/conf-millis {:m 3} :m)))
-  (is (= 180000 (cache/conf-millis {:m [3 :m]} :m))))
-
 (deftest ttl-test
   (let [access-count (atom 0)
         f (memo (fn [] (swap! access-count inc) 1) (assoc inf mc/ttl [500 :ms]))]
@@ -227,9 +223,52 @@
     (testing "That hits and misses are recorded"
       (are [in m]
         (= m (meta (f in)))
-        [1] #:memento.redis{:cached? false}
-        [2] #:memento.redis{:cached? false}
+        [1] nil
+        [2] nil
         [1] #:memento.redis{:cached? true}
         [2] #:memento.redis{:cached? true}
         1 nil
         nil nil))))
+
+(deftest exception-test
+  (let [e (InterruptedException.)
+        cnt (atom 0)
+        f (memo #(do (Thread/sleep 1000) (swap! cnt inc) (throw e)) inf)
+        f1 (future (try (f) (catch Exception e e)))
+        f2 (future (try (f) (catch Exception e e)))]
+    (is (= e @f1))
+    (is (= e @f2))
+    (is (= 1 @cnt))))
+
+(deftest invalidation-test
+  (testing "invalidated by cache value is thrown away and recalculated"
+    (let [c (create inf)
+          cnt (atom 0)
+          f (bind (fn [x] (Thread/sleep 1000) (swap! cnt inc) (with-tag-id {} :aa 1)) {} c)]
+      (are [invalidation-f]
+        (let [_ (util/wipe)
+              _ (reset! cnt 0)
+              f1 (future (f 0))]
+          (Thread/sleep 100)
+          (invalidation-f)
+          @f1
+          (is (= 2 @cnt)))
+        #(memo-clear! f)
+        #(memo-clear! f 0)
+        #(memo-clear-tag! :aa 1)
+        #(memo-clear-cache! c)))))
+
+(deftest var-expiry-test
+  (testing "uses segment expiry"
+    (let [c (create (assoc inf mc/ttl 5 mr/ttl-fn (fn [_ _ v] (when (= v -1) 1))))
+          f (bind (comp identity identity) {mc/ttl 1 mr/ttl-fn (fn [_ _ v] (when (= v -1) 5))} c)
+          f2 (bind (comp identity identity) {} c)]
+      (f 1)
+      (f -1)
+      (f2 1)
+      (f2 -1)
+      (is (= {[-1] -1 [1] 1} (as-map f)))
+      (is (= {[-1] -1 [1] 1} (as-map f2)))
+      (Thread/sleep 1500)
+      (is (= {[-1] -1} (as-map f)))
+      (is (= {[1] 1} (as-map f2))))))

@@ -7,7 +7,8 @@
   - ret-fn
   - evt-fn
   - ttl
-  - fade"
+  - fade
+  - ret-ex-fn"
   (:require [memento.core :as core]
             [memento.redis.cache :as cache]
             [memento.redis.util :as util]
@@ -102,6 +103,12 @@
    (util/nuke-keyspace ((cache/conf-conn {::conn conn})) keys-generator)))
 
 (def hit-detect?
-  "Cache setting, if set to true, any time there's a cache miss and an IObj is returned, it will have
-  meta key :memento.redis/cached? with value true/false"
+  "Cache setting, if set to true, any returned IObj that was cached in Redis will have
+  meta key :memento.redis/cached? with value true"
   ::hit-detect?)
+
+(def ttl-fn
+  "Cache and function bind setting. Value is a function (fn [mount-config key value]). It allows that
+   you specify a function that decides TTL on per entry basis. It should return a duration, if nothing
+   is returned, the ttl/fade setting is used."
+  ::ttl-fn)

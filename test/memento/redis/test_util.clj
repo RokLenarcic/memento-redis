@@ -1,12 +1,15 @@
 (ns memento.redis.test-util
   (:require [taoensso.carmine :as car]
             [memento.redis.cache]
+            [memento.redis.poll.daemon :as daemon]
             [memento.redis.keys :as keys]
             [memento.redis.util :as util]
-            [memento.core :as core]
-            [memento.mount :as mount])
+            [memento.core :as core])
   (:import (memento.base Segment)
-           (memento.redis.cache RedisCache)))
+           (memento.redis.cache RedisCache)
+           (memento.redis.poll Loads)))
+
+(do @daemon/daemon-thread)
 
 (def prefix "MMR-TEST")
 
@@ -19,7 +22,7 @@
 (defn test-key
   "An entry key in test keyspace."
   [k]
-  (keys/entry-key test-keygen "" (Segment. identity identity "") k))
+  (keys/entry-key test-keygen "" (Segment. identity identity "" {}) k))
 
 (defn add-entry
   "Add a full test generator keyed entry"
@@ -55,9 +58,12 @@
          (when-not (empty? ks#)
            (car/wcar {} (apply car/del ks#)))))))
 
-(defn fixture-wipe [f]
+(defn wipe []
   (util/nuke-keyspace {} test-keygen)
+  (.clear Loads/maint))
+
+(defn fixture-wipe [f]
+  (wipe)
   (try
     (f)
-    (finally
-      (util/nuke-keyspace {} test-keygen))))
+    (finally (wipe))))

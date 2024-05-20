@@ -8,6 +8,7 @@ Memento version compatibility
 
 | Memento | Memento Redis |
 |---------|---------------|
+| 1.3.x+  | 0.4.x         |
 | 1.2.x   | 0.3.x         |
 | 1.1.x   | 0.2.x         |
 | 1.0.x   | 0.1.x         |
@@ -58,6 +59,31 @@ Redis itself does not support size based eviction except when defined over whole
 instance for each such scenario.
 
 [**Using Redis as an LRU cache**](https://redis.io/topics/lru-cache)
+
+## Per entry TTL eviction
+
+If you specify `:memento.redis/ttl-fn` function it will get called for each entry. If the function returns nil,
+then the ttl or fade setting value will be used for expiry instead. Note that you cannot specify
+fade setting on per entry basis.
+
+```clojure
+;; 10 minute expire-after-write for odd values and 1 minute for even
+(fn [segment k v] (if (odd? v) [10 :m] [1 :m]))
+```
+
+## Function bind expiry
+
+You can specify the above 3 expiry settings either in the cache config or in function bind config map.
+
+If they are specifies on function bind config, then expiry for entries from that function use that config.
+
+If you specify combined config these settings go to cache config.
+
+```clojure
+;; entries from this function will be cached 1 minute 
+;; but the cache that backs this will cache for 10 minutes in general
+(m/memo #'my-function {mc/ttl [1 :min]} {mc/type mr/cache mr/conn {} mc/ttl [10 :m]})
+```
 
 ## Cache name
 
