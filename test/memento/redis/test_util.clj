@@ -3,11 +3,15 @@
             [memento.redis.cache]
             [memento.redis.poll.daemon :as daemon]
             [memento.redis.keys :as keys]
+            [memento.redis.loader :as loader]
             [memento.redis.util :as util]
             [memento.core :as core])
   (:import (memento.base Segment)
-           (memento.redis.cache RedisCache)
-           (memento.redis.poll Loads)))
+           (memento.redis.cache RedisCache)))
+
+(defn sprn [& args]
+  (locking println
+    (apply println args)))
 
 (do @daemon/daemon-thread)
 
@@ -60,7 +64,7 @@
 
 (defn wipe []
   (util/nuke-keyspace {} test-keygen)
-  (.clear Loads/maint))
+  (.clear loader/maint))
 
 (defn fixture-wipe [f]
   (wipe)

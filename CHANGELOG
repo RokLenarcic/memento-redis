@@ -1,4 +1,11 @@
-#### 0.4.xx
+#### 0.5.23
+
+- bump Carmine dep to latest
+- added more tests
+- added Redis Pub/Sub listener that will listen for sec index invalidations from foreign JVMs
+- fix for secondary index maintenance
+
+#### 0.4.22
 
 - complete rewrite of loader in Java
 - fixes issues with concurrent access to same keys triggering multiple Redis accesses, important concurrency fixes

@@ -18,4 +18,6 @@ public interface LoaderSupport {
     void abandonLoad(Object conn, Object key, Object loadMarker);
 
     IPersistentVector completeLoadKeys(Object cacheName, Object keysGenerator, Object key, IPersistentSet tagIdents);
+
+    void ensureListener(Object conn);
 }

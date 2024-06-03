@@ -2,8 +2,8 @@
   (:require [clojure.java.io :as io]
             [memento.base :as b]
             [memento.config :as mc]
+            [memento.redis.listener :as listener]
             [memento.redis.sec-index :as sec-index]
-            [memento.redis.keys :as keys]
             [taoensso.nippy :as nippy]
             [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car])
@@ -13,7 +13,15 @@
            (java.util.function BiFunction BiConsumer)
            (clojure.lang Keyword)
            (java.util ArrayList List UUID)
-           (memento.redis.poll Load Loader LoaderSupport Loads)))
+           (memento.redis.poll Load Loader LoaderSupport)))
+
+(def ^ConcurrentHashMap maint
+  "Map of conn to map of key to promise.
+
+  For each connection the submap contains Redis keys to a Load object. In Load object:
+  - If marker is present, then it's our load, and we must deliver to redis.
+  - If not, a foreign JVM is going to deliver to Redis, and we must scan redis for it."
+  (ConcurrentHashMap. 4 (float 0.75) 8))
 
 (nippy/extend-freeze EntryMeta ::b/entry-meta [^EntryMeta x data-output]
                      (nippy/-freeze-with-meta! (.getV x) data-output)
@@ -180,7 +188,9 @@
     (completeLoadKeys [this cname kg k tag-idents]
       (if (seq tag-idents)
         (sec-index/keys-param-for-sec-idx kg k cname tag-idents)
-        [k]))))
+        [k]))
+    (ensureListener [this conn]
+      (listener/ensure-l conn))))
 
 (defn for-conf [conf keygen]
   (Loader. (:memento.redis/name conf "")
@@ -191,5 +201,5 @@
            (mc/fade conf)
            (:memento.redis/ttl-fn conf)
            (:memento.redis/hit-detect? conf false)
-           Loads/maint
+           maint
            support))

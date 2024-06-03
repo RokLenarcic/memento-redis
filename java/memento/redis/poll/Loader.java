@@ -15,6 +15,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class Loader {
 
+    /**
+     * How long before a load marker fades. This is to prevent JVM exiting or dying from leaving LoadMarkers
+     * in Redis indefinitely, causing everyone to block on that key forever. This time is refreshed every
+     * second by a daemon thread, however a long GC will cause LoadMarkers to fade when they shouldn't.
+     *
+     *   Adjust this setting appropriately via memento.redis.load_marker_fade system property.
+     *
+     */
+    public static final int LOAD_MARKER_FADE_SEC = Integer.parseInt(System.getProperty("memento.redis.load_marker_fade", "5"));
+
+
     private final Object cacheName;
     private final Object keysGenerator;
 
@@ -51,7 +62,10 @@ public class Loader {
     }
 
     public ConcurrentHashMap<Object, Load> connMap(Object conn) {
-        return maint.computeIfAbsent(conn, x -> new ConcurrentHashMap<>(16, 0.75f, 8));
+        return maint.computeIfAbsent(conn, x -> {
+            s.ensureListener(conn);
+            return new ConcurrentHashMap<>(16, 0.75f, 8);
+        });
     }
 
 
@@ -155,7 +169,7 @@ public class Loader {
             try {
                 Long fadeMs = fadeMs(segment);
                 // no entry in maintenance map, let's try to claim it in Redis
-                IPersistentVector entry = s.fetchEntry(conn, key, newLoad.getLoadMarker(), Loads.LOAD_MARKER_FADE_SEC * 1000, fadeMs);
+                IPersistentVector entry = s.fetchEntry(conn, key, newLoad.getLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
                 // entry already exists in Redis
                 if (entry.valAt(0) != null) {
                     Object cachedVal = entry.valAt(1);
@@ -202,8 +216,12 @@ public class Loader {
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
-                p.deliverException(retExFn == null ? t : (Throwable) retExFn.invoke(args, t));
-                throw t;
+                if (!p.isInvalid()) {
+                    p.deliverException(retExFn == null ? t : (Throwable) retExFn.invoke(args, t));
+                    throw t;
+                } else {
+                    return EntryMeta.absent;
+                }
             } finally {
                 p.releaseResult();
             }
@@ -217,7 +235,7 @@ public class Loader {
         try {
             Long fadeMs = fadeMs(segment);
             // no entry in maintenance map, let's try to claim it in Redis
-            IPersistentVector entry = s.fetchEntry(conn, key, s.newLoadMarker(), Loads.LOAD_MARKER_FADE_SEC * 1000, fadeMs);
+            IPersistentVector entry = s.fetchEntry(conn, key, s.newLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
             if (entry.valAt(0) != null) {
                 Object cachedVal = entry.valAt(1);
                 if (!s.isLoadMarker(cachedVal) && !LockoutMap.awaitLockout(cachedVal)) {
@@ -258,5 +276,13 @@ public class Loader {
 
     public ConcurrentHashMap<Object, ConcurrentHashMap<Object, Load>> getMaint() {
         return maint;
+    }
+
+    public static void addInvalidations(ConcurrentHashMap<Object, ConcurrentHashMap<Object, Load>> maint, Iterable<Object> iterable) {
+        for (ConcurrentHashMap<Object, Load> m : maint.values()) {
+            for (Load l : m.values()) {
+                l.getPromise().addInvalidIds(iterable);
+            }
+        }
     }
 }

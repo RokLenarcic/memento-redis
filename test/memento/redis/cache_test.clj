@@ -241,22 +241,21 @@
     (is (= 1 @cnt))))
 
 (deftest invalidation-test
-  (testing "invalidated by cache value is thrown away and recalculated"
-    (let [c (create inf)
-          cnt (atom 0)
-          f (bind (fn [x] (Thread/sleep 1000) (swap! cnt inc) (with-tag-id {} :aa 1)) {} c)]
-      (are [invalidation-f]
-        (let [_ (util/wipe)
-              _ (reset! cnt 0)
-              f1 (future (f 0))]
-          (Thread/sleep 100)
-          (invalidation-f)
-          @f1
-          (is (= 2 @cnt)))
-        #(memo-clear! f)
-        #(memo-clear! f 0)
-        #(memo-clear-tag! :aa 1)
-        #(memo-clear-cache! c)))))
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [x] (swap! cnt inc) (Thread/sleep 1000) (with-tag-id {} :aa 1)) {} c)]
+    (are [invalidation-f msg]
+      (let [_ (util/wipe)
+            _ (reset! cnt 0)
+            f1 (future (f 0))]
+        (Thread/sleep 100)
+        (invalidation-f)
+        @f1
+        (testing msg (is (= 2 @cnt))))
+      #(memo-clear! f) "memo-clear"
+      #(memo-clear! f 0) "memo-clear 0"
+      #(memo-clear-tag! :aa 1) "memo-clear-tag"
+      #(memo-clear-cache! c) "memo-clear-cache")))
 
 (deftest var-expiry-test
   (testing "uses segment expiry"

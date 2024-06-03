@@ -8,7 +8,8 @@ Memento version compatibility
 
 | Memento | Memento Redis |
 |---------|---------------|
-| 1.3.x+  | 0.4.x         |
+| 1.4.x   | 0.5.x         |
+| 1.3.x   | 0.4.x         |
 | 1.2.x   | 0.3.x         |
 | 1.1.x   | 0.2.x         |
 | 1.0.x   | 0.1.x         |

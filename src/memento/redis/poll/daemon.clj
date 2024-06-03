@@ -7,15 +7,17 @@
   - maintain expiry of load markers (generally about each second)
   - secondary indexes cleanup (generally every 4 seconds)"
   (:require [memento.redis.loader :as loader]
+            [memento.redis.listener :as listener]
             [memento.redis.sec-index :as sec-index]
             [taoensso.timbre :as log])
-  (:import (memento.redis.poll Loads)))
+  (:import (memento.base LockoutMap LockoutMap$Listener)
+           (memento.redis.poll Loader)))
 
 (def sleep-interval
   "Time in ms between thread wakeups."
   (Long/parseLong (System/getProperty "memento.redis.daemon_interval" "40")))
 
-(def load-markers-interval 1000)
+(def big-maint-interval 1000)
 (def sec-index-interval
   "Time in ms to perform secondary index cleanups (removes entries pointing to
   non-existent keys)"
@@ -25,12 +27,16 @@
   "Perform maintenance steps, given a map of last time each type was done."
   [action-timestamps]
   (let [current (System/currentTimeMillis)
-        load-markers? (< load-markers-interval (- current (:load-markers action-timestamps 0)))
+        big-maint? (< big-maint-interval (- current (:big-maint action-timestamps 0)))
         sec-index? (< sec-index-interval (- current (:sec-index action-timestamps 0)))
         new-timestamps (cond-> action-timestamps
-                         load-markers? (assoc :load-markers current :sec-index current))]
+                         ;; mark the time if steps will be run
+                         big-maint? (assoc :big-maint current)
+                         sec-index? (assoc :sec-index current))]
     (try
-      (loader/maintenance-step Loads/maint load-markers?)
+      (loader/maintenance-step loader/maint big-maint?)
+      (when big-maint?
+        (listener/remove-old-invalidations big-maint-interval))
       (when sec-index?
         (sec-index/maintenance-step sec-index/all-indexes))
       new-timestamps
@@ -40,6 +46,13 @@
 
 (defonce daemon-thread
          (delay
+           (.addListener LockoutMap/INSTANCE
+                         (reify LockoutMap$Listener
+                           (startLockout [this items tag]
+                             (listener/event-start tag items))
+                           (endLockout [this items tag]
+                             (listener/event-end tag)
+                             (Loader/addInvalidations loader/maint items))))
            (doto
              (Thread. ^Runnable (fn []
                                   (loop [action-timestamps {}]
