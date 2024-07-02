@@ -2,7 +2,7 @@
  :deps/prep-lib {:alias :build
                  :fn compile-java
                  :ensure "target/classes"}
- :deps {org.clojars.roklenarcic/memento {:mvn/version "1.4.61"}
+ :deps {org.clojars.roklenarcic/memento {:mvn/version "2.0.63"}
         com.taoensso/carmine {:mvn/version "3.4.1"}}
 
  :aliases {:dev {:extra-paths ["test"]

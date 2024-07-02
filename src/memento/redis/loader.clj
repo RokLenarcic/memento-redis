@@ -10,7 +10,7 @@
   (:import (java.io DataInput DataOutput)
            (memento.base EntryMeta)
            (java.util.concurrent ConcurrentHashMap)
-           (java.util.function BiFunction BiConsumer)
+           (java.util.function BiConsumer)
            (clojure.lang Keyword)
            (java.util ArrayList List UUID)
            (memento.redis.poll Load Loader LoaderSupport)))
@@ -117,18 +117,6 @@
     (when conn+map
       (do (maintain-conn-loads (key conn+map) (val conn+map) refresh-load-markers?)
           (doseq [f futures] (deref f))))))
-
-(defn remove-connections-without-loads
-  "A function that should be called rarely, which removes connections from loading map
-  which have nothing going on."
-  [^ConcurrentHashMap maint-map]
-  (doseq [k (into [] (.keySet maint-map))]
-    (.computeIfPresent
-      maint-map
-      k
-      (reify BiFunction
-        (apply [this k v]
-          (when-not (.isEmpty ^ConcurrentHashMap v) v))))))
 
 (defn remove-load-markers
   "Remove all load markers owned by us from Redis. Useful when JVM is shutting down

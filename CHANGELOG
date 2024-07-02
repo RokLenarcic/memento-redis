@@ -1,11 +1,17 @@
-#### 0.5.23
+# Changelog
+
+## 1.0.24
+
+- moved to Java 11
+
+## 0.5.23
 
 - bump Carmine dep to latest
 - added more tests
 - added Redis Pub/Sub listener that will listen for sec index invalidations from foreign JVMs
 - fix for secondary index maintenance
 
-#### 0.4.22
+## 0.4.22
 
 - complete rewrite of loader in Java
 - fixes issues with concurrent access to same keys triggering multiple Redis accesses, important concurrency fixes
@@ -14,10 +20,10 @@
 - specify expiry on function bind instead of cache
 - invalidations during the load will cause value to be recalculated
 
-#### 0.3.21
+## 0.3.21
 
 - add compatibility with Memento 1.2.x
 
-#### 0.2.20
+## 0.2.20
 
 - added support for detecting cache hits and misses

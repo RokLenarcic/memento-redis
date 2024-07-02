@@ -62,13 +62,6 @@
     (Thread/sleep 2000)
     (is (= (loader/->LoadMarker "AA") (util/get-entry "A")))))
 
-(deftest remove-connections-without-loads-test
-  (let [l (ConcurrentHashMap.)]
-    (.put l {} (ConcurrentHashMap.))
-    (is (not (.isEmpty l)))
-    (loader/remove-connections-without-loads l)
-    (is (.isEmpty l))))
-
 (deftest remove-load-markers-test
   (let [l (ConcurrentHashMap.)
         submap (ConcurrentHashMap.)]
