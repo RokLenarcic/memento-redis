@@ -82,6 +82,10 @@
      IFn
      ;; add new listener if one is not running, see below
      (invoke [this] (.compute listeners conn this))
+     (invoke [this k v]
+       (if (not= (some-> (:status_ v) deref) :running)
+         (listener conn process-msg this)
+         v))
      BiFunction
      (apply [this k v]
        ;; here we benefit from the swapping BiFunction also being a on-broken-listener function
