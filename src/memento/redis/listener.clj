@@ -7,11 +7,6 @@
            (java.util.function BiFunction)
            (memento.base LockoutTag)))
 
-(def ^:dynamic *conn-fn*
-  "Function that is used on the connection when creating a listener. Default one
-  strips out connection timeout parameters, as that would close listener. You can rebind this to your own."
-  (fn [conn] (dissoc conn :timeout :timeout-ms :conn-timeout-ms)))
-
 (def ^ConcurrentHashMap invalidations
   "Invalidation ID -> [lockout-tag timestamp-ms tag-ids]. Timestamp is there so we can cull invalidations that are too long
   e.g. foreign JVM dies during invalidation, so it never triggers invalidation end."
@@ -25,16 +20,15 @@
 
 (defn listener
   "Creates a new listener. If conn is broken on-broken-listener is called"
-  [conn f ^Runnable on-broken-listener]
-  (let [listener-conn (*conn-fn* conn)]
-    (car/with-new-listener listener-conn
-      (fn [[typ c msg] _]
-        (case typ
-          "message" (when (= c channel) (f msg))
-          "carmine" (when (and (= "carmine:listener:error" c) (= :conn-broken (:error msg)))
-                      (on-broken-listener))
-          nil)) {}
-      (car/subscribe channel))))
+  [conn-spec f ^Runnable on-broken-listener]
+  (car/with-new-listener conn-spec
+    (fn [[typ c msg] _]
+      (case typ
+        "message" (when (= c channel) (f msg))
+        "carmine" (when (and (= "carmine:listener:error" c) (= :conn-broken (:error msg)))
+                    (on-broken-listener))
+        nil)) {}
+    (car/subscribe channel)))
 
 ;; on duplicates: it is possible that the user has multiple connections that actually map to the same
 ;; redis instance, e.g. {} and {:timeout 500} are same connection logically, but our mechanism here will
@@ -81,16 +75,16 @@
   ((reify
      IFn
      ;; add new listener if one is not running, see below
-     (invoke [this] (.compute listeners conn this))
+     (invoke [this] (.compute listeners (:spec conn {}) this))
      (invoke [this k v]
        (if (not= (some-> (:status_ v) deref) :running)
-         (listener conn process-msg this)
+         (listener k process-msg this)
          v))
      BiFunction
      (apply [this k v]
        ;; here we benefit from the swapping BiFunction also being a on-broken-listener function
        (if (not= (some-> (:status_ v) deref) :running)
-         (listener conn process-msg this)
+         (listener k process-msg this)
          v)))))
 
 (defn shutdown-listeners []
