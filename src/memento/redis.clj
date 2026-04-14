@@ -80,7 +80,7 @@
 
 (def anon-key
   "Specifies how Memento Segment ID is processed by default KeysGenerator, when ID is a function object.
-  Available settings: :empty, :stringify, defaults to :empty.
+  Available settings: :empty, :stringify, defaults to :stringify.
 
   If :empty, then any function object ID is replaced by empty string.
   If :stringify, then any function object ID is replaced by (str function)"
