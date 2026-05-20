@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.30
+
+- Update for Memento 2.1.x invalidation epoch APIs.
+- Add Redis cache epoch key helpers for upcoming Redis-authoritative tag invalidation.
+
 ## 1.0.24
 
 - moved to Java 11

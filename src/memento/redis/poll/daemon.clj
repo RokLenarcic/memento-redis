@@ -10,7 +10,7 @@
             [memento.redis.listener :as listener]
             [memento.redis.sec-index :as sec-index]
             [taoensso.timbre :as log])
-  (:import (memento.base LockoutMap LockoutMap$Listener)
+  (:import (memento.base TagInvalidation TagInvalidation$Listener)
            (memento.redis.poll Loader)))
 
 (def sleep-interval
@@ -18,6 +18,7 @@
   (Long/parseLong (System/getProperty "memento.redis.daemon_interval" "40")))
 
 (def big-maint-interval 1000)
+(def stale-invalidation-timeout 45000)
 (def sec-index-interval
   "Time in ms to perform secondary index cleanups (removes entries pointing to
   non-existent keys)"
@@ -36,7 +37,7 @@
     (try
       (loader/maintenance-step loader/maint big-maint?)
       (when big-maint?
-        (listener/remove-old-invalidations big-maint-interval))
+        (listener/remove-old-invalidations stale-invalidation-timeout))
       (when sec-index?
         (sec-index/maintenance-step sec-index/all-indexes))
       new-timestamps
@@ -45,14 +46,14 @@
         new-timestamps))))
 
 (defonce daemon-thread
-         (delay
-           (.addListener LockoutMap/INSTANCE
-                         (reify LockoutMap$Listener
-                           (startLockout [this items tag]
-                             (listener/event-start tag items))
-                           (endLockout [this items tag]
-                             (listener/event-end tag)
-                             (Loader/addInvalidations loader/maint items))))
+          (delay
+            (.addListener TagInvalidation/INSTANCE
+                          (reify TagInvalidation$Listener
+                            (startInvalidation [this items epoch-map]
+                              (listener/event-start items epoch-map)
+                              (Loader/addInvalidations loader/maint items))
+                            (endInvalidation [this items epoch-map]
+                              (listener/event-end items epoch-map))))
            (doto
              (Thread. ^Runnable (fn []
                                   (loop [action-timestamps {}]

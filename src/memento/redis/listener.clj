@@ -1,14 +1,13 @@
 (ns memento.redis.listener
-  (:require [memento.base :as base]
-            [taoensso.carmine :as car])
+  (:require [taoensso.carmine :as car])
   (:import (clojure.lang IFn)
            (java.io Closeable)
            (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiFunction)
-           (memento.base LockoutTag)))
+           (memento.base TagInvalidation)))
 
 (def ^ConcurrentHashMap invalidations
-  "Invalidation ID -> [lockout-tag timestamp-ms tag-ids]. Timestamp is there so we can cull invalidations that are too long
+  "Invalidation epoch -> [timestamp-ms tag-ids]. Timestamp is there so we can cull invalidations that are too long
   e.g. foreign JVM dies during invalidation, so it never triggers invalidation end."
   (ConcurrentHashMap.))
 
@@ -17,6 +16,8 @@
   (ConcurrentHashMap. (int 4) (float 0.75) (int 8)))
 
 (def channel "mem-redis-inval")
+
+(def tag-invalidation TagInvalidation/INSTANCE)
 
 (defn listener
   "Creates a new listener. If conn is broken on-broken-listener is called"
@@ -36,39 +37,43 @@
 ;; think its different
 
 
-(defn process-msg [[action invalidation-id items]]
+(defn process-msg [[action epoch items]]
   (case action
-    :start (let [tag (LockoutTag. invalidation-id)]
-             ;; we need to insert before starting lockout, so the listener can detect
-             ;; if we it was this .startLockout that caused the event or not
-             (when-not (.putIfAbsent invalidations invalidation-id [tag (System/currentTimeMillis) items])
-               (.startLockout base/lockout-map items tag)))
+    :start (when-not (.putIfAbsent invalidations epoch [(System/currentTimeMillis) items])
+             (.startInvalidation tag-invalidation items epoch))
     ;; we remove first, so the listener can detect that it was this function that caused
-    ;; .endLockout event
-    :end (when-let [[tag _ items] (.remove invalidations invalidation-id)]
-           (.endLockout base/lockout-map items tag))
+    ;; .endInvalidation event
+    :end (when-let [[_ items] (.remove invalidations epoch)]
+           (.endInvalidation tag-invalidation items epoch))
     nil)
   nil)
 
-(defn event-start [^LockoutTag lockout-tag items]
+(defn event-start [items epoch-map]
   ;; if we already had an invalidation in a map, then this event was caused
   ;; process-msg above (or by duplicates, see above)
-  (when-not (.putIfAbsent invalidations (.getId lockout-tag) [lockout-tag Long/MAX_VALUE items])
-    ;; otherwise post to remote that we started a lockout
-    (run! (fn [conn]
-            (car/wcar conn
-              (car/publish channel [:start (.getId lockout-tag) items])))
-          (keys listeners))))
+  (doseq [item items
+          :let [epoch (get epoch-map item)]
+          :when epoch]
+    (when-not (.putIfAbsent invalidations epoch [Long/MAX_VALUE items])
+      ;; otherwise post to remote that we started an invalidation
+      (run! (fn [conn]
+              (car/wcar conn
+                (car/publish channel [:start epoch items])))
+            (keys listeners)))))
 
-(defn event-end [^LockoutTag lockout-tag]
+(defn event-end [items epoch-map]
   ;; if this event was caused by process-msg above then the invalidation will have been removed already
   ;; so ignore that case.
   (try
-    (when (.remove invalidations (.getId lockout-tag))
-      (run! (fn [conn]
-              (car/wcar conn
-                (car/publish channel [:end (.getId lockout-tag)])))
-            (keys listeners)))
+    (doseq [epoch (or (seq (keep #(get epoch-map %) items))
+                       (seq (keep (fn [[epoch [_ stored-items]]]
+                                    (when (= items stored-items) epoch))
+                                  (seq invalidations))))]
+      (when (.remove invalidations epoch)
+        (run! (fn [conn]
+                (car/wcar conn
+                  (car/publish channel [:end epoch])))
+              (keys listeners))))
     (catch Exception e
       (.printStackTrace e))))
 
@@ -94,12 +99,9 @@
 
 (defn remove-old-invalidations [interval]
   (let [ts (- (System/currentTimeMillis) interval)]
-    (.replaceAll invalidations
-       (reify BiFunction
-         (apply [this k [tag time items :as v]]
-           (if (< time ts)
-             (do (.endLockout base/lockout-map items tag)
-                 nil)
-             v))))))
+    (doseq [[epoch [time items :as v]] (seq invalidations)
+            :when (< time ts)]
+      (when (.remove invalidations epoch v)
+        (.endInvalidation tag-invalidation items epoch)))))
 
 (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable shutdown-listeners))

@@ -37,3 +37,24 @@
           (is (= 500 (count (second ks))))
           (is (every? #(str/starts-with? % "TEST:") (first ks)))
           (is (every? #(str/starts-with? % "TEST:") (second ks))))))))
+
+(deftest epoch-key-test
+  (let [kg util/test-keygen
+        cache-name ""
+        segment (memento.base.Segment. identity identity :memento.redis/epoch {})
+        entry-key (keys/entry-key kg cache-name segment [1])
+        epoch-key (keys/epoch-key kg cache-name)
+        tag-epochs-key (keys/tag-epochs-key kg cache-name)]
+    (is (= [util/prefix cache-name :memento.redis/epoch] epoch-key))
+    (is (= [util/prefix cache-name :memento.redis/tag-epochs] tag-epochs-key))
+    (is (= [util/prefix cache-name :memento.redis/epoch [1]] entry-key))
+    (is (not= epoch-key entry-key))
+    (is (keys/entry-key? kg cache-name entry-key))
+    (is (not (keys/entry-key? kg cache-name epoch-key)))
+    (is (not (keys/entry-key? kg cache-name tag-epochs-key)))
+    (car/wcar {}
+      (car/set epoch-key 1)
+      (car/set tag-epochs-key 1)
+      (car/set entry-key 1))
+    (is (= #{epoch-key tag-epochs-key entry-key}
+           (set (car/wcar {} (car/keys (keys/cache-wildcard-key kg cache-name))))))))

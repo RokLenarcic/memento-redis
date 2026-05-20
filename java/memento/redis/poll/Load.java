@@ -24,7 +24,7 @@ public class Load {
     }
 
     public void ourLoad() {
-        promise.init();
+        promise.ownerThread();
     }
 
     public void foreignLoad() {

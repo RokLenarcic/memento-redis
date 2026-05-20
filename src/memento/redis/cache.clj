@@ -45,6 +45,7 @@
       this))
   (invalidateIds [this ids]
     (let [{:keys [conn keygen]} fns]
+      (Loader/addInvalidations (.getMaint lookup) ids)
       (sec-index/invalidate-by-index
         (conn)
         (keys/sec-indexes-key keygen)
@@ -79,6 +80,7 @@
       (util/kv-by-pattern
         (conn)
         (keys/cache-wildcard-key keygen cname)
+        #(keys/entry-key? keygen cname %)
         #(next (next %)))))
   (asMap [this segment]
     (let [{:keys [conn keygen]} fns]

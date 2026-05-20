@@ -3,8 +3,9 @@ package memento.redis.poll;
 import clojure.lang.*;
 import memento.base.Durations;
 import memento.base.EntryMeta;
-import memento.base.LockoutMap;
+import memento.base.InvalidationClock;
 import memento.base.Segment;
+import memento.base.TagInvalidation;
 import memento.caffeine.SpecialPromise;
 
 import java.util.ArrayList;
@@ -142,14 +143,7 @@ public class Loader {
     }
 
     private Object await(Object key, Load l) throws Throwable {
-        SpecialPromise p = l.getPromise();
-        Object ret = p.await(key);
-        if (ret != EntryMeta.absent && !LockoutMap.awaitLockout(ret)) {
-            // if not invalidated, return the value
-            return EntryMeta.unwrap(ret);
-        } else {
-            return EntryMeta.absent;
-        }
+        return EntryMeta.unwrap(l.getPromise().await(key));
     }
 
     /**
@@ -181,7 +175,7 @@ public class Loader {
                         // there's a cached value, remove the load and return it if valid, otherwise absent
                         loads.remove(key, newLoad);
                         cachedVal = markCached(cachedVal);
-                        return p.deliver(cachedVal) ? EntryMeta.unwrap(cachedVal) : EntryMeta.absent;
+                        return p.deliver(cachedVal, latestTagInvalidation(cachedVal)) ? EntryMeta.unwrap(cachedVal) : EntryMeta.absent;
                     }
                 } else {
                     newLoad.ourLoad();
@@ -190,7 +184,7 @@ public class Loader {
                         result = retFn.invoke(args, result);
                     }
                     loads.remove(key, newLoad);
-                    if (!p.deliver(result)) {
+                    if (!p.deliver(result, latestTagInvalidation(result))) {
                         // The SpecialPromise was invalidated
                         s.abandonLoad(conn, key, newLoad.getLoadMarker());
                         return EntryMeta.absent;
@@ -238,7 +232,7 @@ public class Loader {
             IPersistentVector entry = s.fetchEntry(conn, key, s.newLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
             if (entry.valAt(0) != null) {
                 Object cachedVal = entry.valAt(1);
-                if (!s.isLoadMarker(cachedVal) && !LockoutMap.awaitLockout(cachedVal)) {
+                if (!s.isLoadMarker(cachedVal) && !activelyInvalidated(cachedVal)) {
                     return EntryMeta.unwrap(cachedVal);
                 }
             }
@@ -279,10 +273,28 @@ public class Loader {
     }
 
     public static void addInvalidations(ConcurrentHashMap<Object, ConcurrentHashMap<Object, Load>> maint, Iterable<Object> iterable) {
+        ArrayList<Object> invalidations = new ArrayList<>();
+        for (Object id : iterable) {
+            invalidations.add(id);
+        }
         for (ConcurrentHashMap<Object, Load> m : maint.values()) {
             for (Load l : m.values()) {
-                l.getPromise().addInvalidIds(iterable);
+                l.getPromise().addInvalidIds(invalidations);
             }
         }
+    }
+
+    private long latestTagInvalidation(Object value) {
+        if (value instanceof EntryMeta) {
+            return TagInvalidation.INSTANCE.lastInvalidatedEpoch(((EntryMeta) value).getTagIdents());
+        }
+        return InvalidationClock.NO_INVALIDATION_EPOCH;
+    }
+
+    private boolean activelyInvalidated(Object value) {
+        if (value instanceof EntryMeta) {
+            return TagInvalidation.INSTANCE.lastInvalidatedEpoch(((EntryMeta) value).getTagIdents()) > InvalidationClock.NO_INVALIDATION_EPOCH;
+        }
+        return false;
     }
 }

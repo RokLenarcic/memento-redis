@@ -73,6 +73,12 @@
     "Returns true if key belongs to the Segment")
   (entry-key [this cache-name segment args-key]
     "A concrete key for an entry. Segment is memento.base.Segment.")
+  (entry-key? [this cache-name k]
+    "Returns true if key is a concrete cache entry key.")
+  (epoch-key [this cache-name]
+    "Key for the cache-wide Redis invalidation epoch.")
+  (tag-epochs-key [this cache-name]
+    "Key for the hash of tag id -> latest Redis invalidation epoch.")
   (sec-index-id-key [this cache-name id]
     "ID for the SET that houses all the keys that get invalidated by id.")
   (sec-indexes-key [this]
@@ -100,6 +106,15 @@
           (and (= prefix memento-space-prefix) (= n cache-name) (= segment-id (segment-id-fn (.getId ^Segment segment))))))
       (entry-key [this cache-name segment args-key]
         (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)) args-key))
+      (entry-key? [this cache-name k]
+        (let [[prefix n] k]
+          (and (= prefix memento-space-prefix)
+               (= n cache-name)
+               (= 4 (count k)))))
+      (epoch-key [this cache-name]
+        (list memento-space-prefix cache-name :memento.redis/epoch))
+      (tag-epochs-key [this cache-name]
+        (list memento-space-prefix cache-name :memento.redis/tag-epochs))
       (sec-index-id-key [this cache-name id]
         (list memento-secondary-index-prefix cache-name id))
       (sec-indexes-key [this]

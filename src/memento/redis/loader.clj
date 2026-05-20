@@ -8,7 +8,7 @@
             [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car])
   (:import (java.io DataInput DataOutput)
-           (memento.base EntryMeta)
+            (memento.base EntryMeta InvalidationClock TagInvalidation)
            (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiConsumer)
            (clojure.lang Keyword)
@@ -71,6 +71,12 @@
       (for [[k v] (car/wcar conn (car/lua cached-entries-script ks [our-load-marker]))]
         (list k (if (= our-load-marker v) b/absent v))))))
 
+(defn latest-tag-invalidation
+  [v]
+  (if (instance? EntryMeta v)
+    (.lastInvalidatedEpoch TagInvalidation/INSTANCE (.getTagIdents ^EntryMeta v))
+    InvalidationClock/NO_INVALIDATION_EPOCH))
+
 (defn refresh-load-markers
   "Refresh expire of load markers under keys ks, if they are still the same as we
   expect."
@@ -104,7 +110,7 @@
             :let [^Load load (.remove loads-map k)]]
       (when load
         (let [p (.getPromise load)]
-          (.deliver p v)
+          (.deliver p v (latest-tag-invalidation v))
           (.releaseResult p))))))
 
 (defn maintenance-step
