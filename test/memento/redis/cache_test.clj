@@ -6,7 +6,9 @@
             [memento.redis.cache :as cache]
             [memento.redis :as mr]
             [memento.redis.keys :as keys]
-            [memento.redis.test-util :as util])
+            [memento.redis.sec-index :as sec-index]
+            [memento.redis.test-util :as util]
+            [taoensso.carmine :as car])
   (:import (clojure.lang ExceptionInfo)
            (memento.base Segment)))
 
@@ -49,6 +51,12 @@
 (deftest as-map-test
   (let [memod (memo inc inf)]
     (doseq [x (range 5)] (memod x))
+    (let [cache (active-cache memod)
+          keygen (-> cache :fns :keygen)
+          cname (:cname cache)]
+      (car/wcar {}
+        (car/set (keys/epoch-key keygen cname) 1)
+        (car/hset (keys/tag-epochs-key keygen cname) "tag" 1)))
     (is (= {[(str inc) [0]] 1
             [(str inc) [1]] 2
             [(str inc) [2]] 3
@@ -61,6 +69,17 @@
             [3] 4
             [4] 5}
            (as-map memod)))))
+
+(deftest cache-clear-removes-epoch-metadata-test
+  (let [c (create inf)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)]
+    (car/wcar {}
+      (car/set (keys/epoch-key keygen cname) 1)
+      (car/hset (keys/tag-epochs-key keygen cname) "tag" 1))
+    (memo-clear-cache! c)
+    (is (= 0 (car/wcar {} (car/exists (keys/epoch-key keygen cname)))))
+    (is (= 0 (car/wcar {} (car/exists (keys/tag-epochs-key keygen cname)))))))
 
 (defn- check-core-features
   [factory]
@@ -256,6 +275,103 @@
       #(memo-clear! f 0) "memo-clear 0"
       #(memo-clear-tag! :aa 1) "memo-clear-tag"
       #(memo-clear-cache! c) "memo-clear-cache")))
+
+(deftest redis-tag-epoch-rejects-stale-load-test
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [_]
+                  (let [n (swap! cnt inc)]
+                    (Thread/sleep 1000)
+                    (with-tag-id n :aa 1)))
+                {}
+                c)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)
+        id-key (keys/sec-index-id-key keygen cname [:aa 1])]
+    (let [fut (future (f 0))]
+      (Thread/sleep 100)
+      ;; Simulate another JVM invalidating the tag without relying on local pub/sub delivery.
+      (sec-index/invalidate-by-index
+        {}
+        (keys/sec-indexes-key keygen)
+        (keys/epoch-key keygen cname)
+        (keys/tag-epochs-key keygen cname)
+        [id-key])
+      @fut
+      (is (= 2 @cnt))
+      (is (= 2 (f 0))))))
+
+(deftest redis-tag-epoch-rejects-joiner-load-test
+  ;; Joiners blocked on SpecialPromise.await must also observe absent and re-loop
+  ;; when the loader's completeLoad returns COMPLETE_LOAD_STALE_TAG. This validates
+  ;; the p.reject() call in Loader.get's tagged-path stale-tag handling.
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [_]
+                  (let [n (swap! cnt inc)]
+                    (Thread/sleep 1000)
+                    (with-tag-id n :aa 1)))
+                {}
+                c)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)
+        id-key (keys/sec-index-id-key keygen cname [:aa 1])]
+    (let [loader-fut (future (f 0))
+          _ (Thread/sleep 50)
+          joiner-fut (future (f 0))]
+      (Thread/sleep 100)
+      ;; Simulate another JVM invalidating the tag without relying on local pub/sub delivery.
+      (sec-index/invalidate-by-index
+        {}
+        (keys/sec-indexes-key keygen)
+        (keys/epoch-key keygen cname)
+        (keys/tag-epochs-key keygen cname)
+        [id-key])
+      (let [loader-v @loader-fut
+            joiner-v @joiner-fut]
+        (is (= {:cnt 2 :loader 2 :joiner 2}
+               {:cnt @cnt :loader loader-v :joiner joiner-v}))))))
+
+(deftest redis-tag-epoch-ignores-unrelated-tags-test
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [_]
+                  (let [n (swap! cnt inc)]
+                    (Thread/sleep 1000)
+                    (with-tag-id n :aa 1)))
+                {}
+                c)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)
+        id-key (keys/sec-index-id-key keygen cname [:bb 1])]
+    (let [fut (future (f 0))]
+      (Thread/sleep 100)
+      (sec-index/invalidate-by-index
+        {}
+        (keys/sec-indexes-key keygen)
+        (keys/epoch-key keygen cname)
+        (keys/tag-epochs-key keygen cname)
+        [id-key])
+      (is (= 1 @fut))
+      (is (= 1 @cnt))
+      (is (= 1 (f 0)))
+      (is (= 1 @cnt)))))
+
+(deftest redis-tag-epoch-allows-manual-add-after-invalidation-test
+  (let [f (memo inc (assoc inf mc/tags #{:test-tag}))
+        cache (active-cache f)
+        keygen (-> cache :fns :keygen)
+        cname (:cname cache)
+        id-key (keys/sec-index-id-key keygen cname [:test-tag 1])]
+    (sec-index/invalidate-by-index
+      {}
+      (keys/sec-indexes-key keygen)
+      (keys/epoch-key keygen cname)
+      (keys/tag-epochs-key keygen cname)
+      [id-key])
+    (memo-add! f {[1] (with-tag-id 100 :test-tag 1)})
+    (is (= 100 (f 1)))
+    (is (= {[1] 100} (as-map f)))))
 
 (deftest var-expiry-test
   (testing "uses segment expiry"

@@ -43,6 +43,43 @@
           _ (.get bb output)]
       (p/raw output))))
 
+(defn wildcard-exact-length
+  "Creates a SCAN pattern that selects keys whose serialized list count equals
+  exactly (inc (count base-key)) and whose first (count base-key) elements match
+  base-key. In other words: only descendants of base-key with exactly one
+  additional element.
+
+  Throws if the target count byte would be a glob metachar (? * [ \\), since the
+  pattern would then be ambiguous. Cache keys are short enough that this is
+  effectively unreachable.
+
+  Need to use REAL list, not list*. Metadata is ignored.
+
+  Escapes bytes ? * [ \\ from provided key."
+  [base-key]
+  (let [target-count (inc (count base-key))
+        _ (when (#{42 63 91 92} target-count)
+            (throw (ex-info "wildcard-exact-length target count collides with glob metachar"
+                            {:target-count target-count :base-key base-key})))
+        ^bytes b-arr (p/byte-str (with-meta base-key nil))
+        b-arr-len (alength b-arr)
+        ;; pin list count byte to the exact target length (no escaping required:
+        ;; we asserted above that this byte is not a glob metachar)
+        _ (aset b-arr 7 (byte target-count))
+        ^ByteBuffer bb (.put (ByteBuffer/allocate (* 2 (alength b-arr)))
+                             b-arr 0 8)]
+    (loop [i 8]
+      (when (< i b-arr-len)
+        (let [b (aget b-arr i)]
+          (case b
+            (42 63 92 91) (.put bb (byte 92))
+            nil)
+          (.put bb b)
+          (recur (inc i)))))
+    (let [output (byte-array (-> bb (.put (byte 42)) .flip .remaining))
+          _ (.get bb output)]
+      (p/raw output))))
+
 (defn by-pattern
   "Returns a SCAN result sequence, partitioned to 1000 items per batch.
    Needs to be called inside car/wcar.
@@ -100,10 +137,13 @@
         (let [[prefix n] k]
           (and (= prefix memento-space-prefix) (= n cache-name))))
       (segment-wildcard-key [this cache-name segment]
-        (wildcard (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)))))
+        (wildcard-exact-length (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)))))
       (segment-key? [this cache-name segment k]
         (let [[prefix n segment-id] k]
-          (and (= prefix memento-space-prefix) (= n cache-name) (= segment-id (segment-id-fn (.getId ^Segment segment))))))
+          (and (= 4 (count k))
+               (= prefix memento-space-prefix)
+               (= n cache-name)
+               (= segment-id (segment-id-fn (.getId ^Segment segment))))))
       (entry-key [this cache-name segment args-key]
         (list memento-space-prefix cache-name (segment-id-fn (.getId ^Segment segment)) args-key))
       (entry-key? [this cache-name k]
@@ -112,9 +152,9 @@
                (= n cache-name)
                (= 4 (count k)))))
       (epoch-key [this cache-name]
-        (list memento-space-prefix cache-name :memento.redis/epoch))
+        (list memento-space-prefix cache-name "e"))
       (tag-epochs-key [this cache-name]
-        (list memento-space-prefix cache-name :memento.redis/tag-epochs))
+        (list memento-space-prefix cache-name "t"))
       (sec-index-id-key [this cache-name id]
         (list memento-secondary-index-prefix cache-name id))
       (sec-indexes-key [this]

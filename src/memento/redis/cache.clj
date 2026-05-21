@@ -34,6 +34,23 @@
     (let [{:keys [conn key-fn]} fns
           c (conn)
           k (key-fn segment args)]
+      ;; Order matters: signal the in-JVM promise FIRST, then delete from Redis.
+      ;;
+      ;; Memento's ICache.invalidate(Segment, ISeq) contract reads "remove from primary
+      ;; map before signalling the promise" — that ordering is calibrated for Caffeine,
+      ;; whose delegate map's atomic CAS makes the removal interlock with the loader's
+      ;; subsequent deliver. Redis has no such interlock: a plain `del k` cannot stop an
+      ;; in-flight loader from re-`set`-ting k via finish-load.lua a moment later.
+      ;;
+      ;; What does stop the loader here is `SpecialPromise.invalidate()`, which clobbers
+      ;; the promise result to absent. The loader's deliver() then returns false, sending
+      ;; it down the abandonLoad branch (no Redis write). So signalling first guarantees
+      ;; that any loader running concurrently abandons its write; the subsequent `del k`
+      ;; cleans up whatever stale value was there before this invalidation began.
+      ;;
+      ;; The narrow window where a fresh caller enters between (A) and (B) and reads the
+      ;; pre-invalidation Redis value is intrinsic to non-atomic read+invalidate flows
+      ;; and self-healing on the next access after (B).
       (.invalidate lookup c k)
       (car/wcar c (car/del k))
       this))
@@ -49,6 +66,8 @@
       (sec-index/invalidate-by-index
         (conn)
         (keys/sec-indexes-key keygen)
+        (keys/epoch-key keygen cname)
+        (keys/tag-epochs-key keygen cname)
         (mapv #(keys/sec-index-id-key keygen cname %) ids))
       this))
   (addEntries [this segment args-to-vals]

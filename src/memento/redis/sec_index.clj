@@ -13,14 +13,19 @@
 
 (defn keys-param-for-sec-idx
   "Script to insert an entry with secondary indexes has special KEYS structure of
-  [k, indexes-key, id-key1, id-key2, ....]."
+  [k, indexes-key, epoch-key, tag-epochs-key, id-key1, id-key2, ....]."
   [kg k cache-name tag-idents]
-  (apply vector k (keys/sec-indexes-key kg) (map #(keys/sec-index-id-key kg cache-name %) tag-idents)))
+  (apply vector
+         k
+         (keys/sec-indexes-key kg)
+         (keys/epoch-key kg cache-name)
+         (keys/tag-epochs-key kg cache-name)
+         (map #(keys/sec-index-id-key kg cache-name %) tag-idents)))
 
 (defn invalidate-by-index
   "Remove (invalidate) secondary index and all the keys therein"
-  [conn indexes-key id-keys]
-  (car/wcar conn (car/lua invalidate-script (cons indexes-key id-keys) {})))
+  [conn indexes-key epoch-key tag-epochs-key id-keys]
+  (car/wcar conn (car/lua invalidate-script (concat [indexes-key epoch-key tag-epochs-key] id-keys) {})))
 
 ;; SECONDARY INDEX MAINTENANCE
 (def clean-up-script (slurp (io/resource "memento/redis/clean-up-expired.lua")))

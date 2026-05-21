@@ -9,12 +9,13 @@ if ret then
     -- fade must be smaller than ttl otherwise fade is useless, enforce this elsewhere though
     redis.call('pexpire', _:k, fade)
   end
-  return {true, ret}
+  return {true, ret, 0}
 else
   if _:load == "0" then
-    return {false, ret}
+    return {false, ret, 0}
   else
+    local validation_epoch = tonumber(redis.call('get', _:epoch-key) or '0')
     redis.call('set', _:k, load_marker, 'PX', tonumber(_:load-ms))
-    return {false, load_marker}
+    return {false, load_marker, validation_epoch}
   end
 end

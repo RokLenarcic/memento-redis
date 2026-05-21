@@ -76,9 +76,9 @@ public class Loader {
         Long writeExpiry = expiryMs(segment, k, v);
         if (v instanceof EntryMeta) {
             EntryMeta em = (EntryMeta) v;
-            s.completeLoad(conn, completeLoadKeys(k, em.getTagIdents()), em.getV(), loadMarker, writeExpiry);
+            s.completeLoad(conn, completeLoadKeys(k, em.getTagIdents()), em.getV(), loadMarker, writeExpiry, null);
         } else {
-            s.completeLoad(conn, completeLoadKeys(k, null), v, loadMarker, writeExpiry);
+            s.completeLoad(conn, completeLoadKeys(k, null), v, loadMarker, writeExpiry, null);
         }
     }
 
@@ -147,15 +147,43 @@ public class Loader {
     }
 
     /**
-     * if this returns absent you need to loop
-     * @param conn
-     * @param segment
-     * @param args
-     * @return
-     * @throws Throwable
+     * Resolve a value for {@code key}, either by loading it ourselves or by joining an
+     * in-progress load. Returns {@link EntryMeta#absent} to signal the caller to re-loop
+     * (the load was invalidated mid-flight or raced with another writer).
+     * <p>
+     * Orchestration of the our-load branch:
+     * <ol>
+     *   <li>{@code loads.putIfAbsent} arbitrates which thread becomes the loader for this
+     *       key. Concurrent callers in the same JVM observe the existing {@link Load} and
+     *       go down the joiner branch ({@code await} on its {@link SpecialPromise}).</li>
+     *   <li>{@code fetchEntry} (fetch.lua) atomically either claims the Redis slot with our
+     *       load marker (and captures the cache's current {@code validation_epoch}) or
+     *       reports an existing value / foreign load marker.</li>
+     *   <li>If we won the claim we invoke the user fn, then {@code loads.remove(key, newLoad)}
+     *       to free the in-JVM slot. This is intentionally done <em>before</em> {@code deliver}:
+     *       it minimises the window joiners can attach to our promise, at the cost of allowing
+     *       a brand-new caller to start a second loader. Redis arbitrates via the load-marker
+     *       check in finish-load.lua, so the duplicate work is benign.</li>
+     *   <li>{@code p.deliver} publishes the value to joiners that are already blocked on
+     *       {@code SpecialPromise.await} — this is the sole channel they receive it through;
+     *       they will <em>not</em> re-read the delegate map.</li>
+     *   <li>{@code completeLoad} writes to Redis. The tagged variant (finish-load-w-sec.lua)
+     *       can return {@code -1} if a tag we depend on was invalidated between fetch and
+     *       finish. On {@code -1} we {@code p.reject()} — this overwrites the promise's
+     *       result with {@link EntryMeta#absent} so joiners woken by {@code releaseResult}
+     *       observe a miss and re-loop. The script itself removes our load marker from Redis
+     *       on the {@code -1} path, so cross-process joiners also retry promptly.</li>
+     *   <li>The {@code finally} runs {@code p.releaseResult()}, opening the latch.
+     *       <strong>It must run after {@code deliver}/{@code reject}/{@code deliverException}</strong>
+     *       so joiners observe a terminal state, never a transient one. Java's try/finally
+     *       guarantees this ordering.</li>
+     * </ol>
+     * The {@code em.isNoCache()} sub-branch is a special case: the value is delivered through
+     * the promise channel (joiners get it once) and {@code abandonLoad} clears the load marker
+     * in Redis, but no value is written. The cache stays empty for this key.
      */
     public Object get(Object conn, Segment segment, ISeq args, Object key) throws Throwable {
-        Load newLoad = new Load(s.newLoadMarker());
+        Load newLoad = new Load(s.newLoadMarker(), InvalidationClock.current());
         ConcurrentHashMap<Object, Load> loads = connMap(conn);
         Load prevLoad = loads.putIfAbsent(key, newLoad);
         if (prevLoad == null) {
@@ -163,7 +191,7 @@ public class Loader {
             try {
                 Long fadeMs = fadeMs(segment);
                 // no entry in maintenance map, let's try to claim it in Redis
-                IPersistentVector entry = s.fetchEntry(conn, key, newLoad.getLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
+                IPersistentVector entry = s.fetchEntry(conn, cacheName, keysGenerator, key, newLoad.getLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
                 // entry already exists in Redis
                 if (entry.valAt(0) != null) {
                     Object cachedVal = entry.valAt(1);
@@ -178,6 +206,7 @@ public class Loader {
                         return p.deliver(cachedVal, latestTagInvalidation(cachedVal)) ? EntryMeta.unwrap(cachedVal) : EntryMeta.absent;
                     }
                 } else {
+                    Long validationEpoch = ((Number)entry.valAt(2)).longValue();
                     newLoad.ourLoad();
                     Object result = AFn.applyToHelper(segment.getF(), args);
                     if (retFn != null) {
@@ -195,11 +224,17 @@ public class Loader {
                         if (em.isNoCache()) {
                             s.abandonLoad(conn, key, newLoad.getLoadMarker());
                         } else {
-                            s.completeLoad(conn, completeLoadKeys(key, em.getTagIdents()), result, newLoad.getLoadMarker(), writeExpiry);
+                            if (s.completeLoad(conn, completeLoadKeys(key, em.getTagIdents()), result, newLoad.getLoadMarker(), writeExpiry, validationEpoch) == LoaderSupport.COMPLETE_LOAD_STALE_TAG) {
+                                p.reject();
+                                return EntryMeta.absent;
+                            }
                         }
                         return em.getV();
                     } else {
-                        s.completeLoad(conn, completeLoadKeys(key, null), result, newLoad.getLoadMarker(), writeExpiry);
+                        if (s.completeLoad(conn, completeLoadKeys(key, null), result, newLoad.getLoadMarker(), writeExpiry, validationEpoch) == LoaderSupport.COMPLETE_LOAD_STALE_TAG) {
+                            p.reject();
+                            return EntryMeta.absent;
+                        }
                         return result;
                     }
                 }
@@ -229,7 +264,7 @@ public class Loader {
         try {
             Long fadeMs = fadeMs(segment);
             // no entry in maintenance map, let's try to claim it in Redis
-            IPersistentVector entry = s.fetchEntry(conn, key, s.newLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
+            IPersistentVector entry = s.fetchEntry(conn, cacheName, keysGenerator, key, s.newLoadMarker(), LOAD_MARKER_FADE_SEC * 1000, fadeMs);
             if (entry.valAt(0) != null) {
                 Object cachedVal = entry.valAt(1);
                 if (!s.isLoadMarker(cachedVal) && !activelyInvalidated(cachedVal)) {

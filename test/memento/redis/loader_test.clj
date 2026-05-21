@@ -1,6 +1,7 @@
 (ns memento.redis.loader-test
   (:require [clojure.test :refer :all]
             [memento.redis.test-util :as util]
+            [memento.redis.keys :as keys]
             [memento.redis.loader :as loader]
             [memento.base :as b]
             [memento.core :as c]
@@ -68,8 +69,8 @@
     (util/add-entry "A" (loader/new-load-marker))
     (util/add-entry "B" (loader/new-load-marker))
     (.put l {} submap)
-    (.put submap (util/test-key "A") (Load. (loader/new-load-marker)))
-    (.put submap (util/test-key "B") (Load. nil))
+    (.put submap (util/test-key "A") (Load. (loader/new-load-marker) 0))
+    (.put submap (util/test-key "B") (Load. nil 0))
     (loader/remove-load-markers l)
     (is (.isEmpty l))
     (is (nil? (util/get-entry "A")))
@@ -86,7 +87,7 @@
   ([k local-marker? marker ttl-ms fade-ms]
    (let [load-marker (loader/new-load-marker)
          loader (Loader. "" util/test-keygen nil nil (when ttl-ms [ttl-ms :ms]) (when fade-ms [fade-ms :ms]) nil false (ConcurrentHashMap.) loader/support)
-         entry (Load. (when local-marker? load-marker))]
+         entry (Load. (when local-marker? load-marker) 0)]
      (.put (.connMap loader {}) (util/test-key k) entry)
      (case marker
        :none nil
@@ -95,6 +96,9 @@
      loader)))
 
 (defn load-for [^Loader loader k] (get-in (.getMaint loader) [{} (util/test-key k)]))
+
+(defn fetch [k load-marker load-ms fade-ms]
+  (loader/fetch {} (util/test-key k) (keys/epoch-key util/test-keygen "") load-marker load-ms fade-ms))
 
 (defn start-load [loader k]
   (let [p (promise)
@@ -187,48 +191,56 @@
 (deftest fetch-test
   (testing "load marker is set if not there"
     (let [load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "A") load-marker 1000000 10000)]
+          [present? v validation-epoch] (fetch "A" load-marker 1000000 10000)]
       (is (not present?))
       (is (= load-marker v))
+      (is (= 0 validation-epoch))
       (is (= load-marker (util/get-entry "A")))))
+  (testing "load marker captures current Redis epoch"
+    (car/wcar {} (car/set (keys/epoch-key util/test-keygen "") 4))
+    (let [load-marker (loader/new-load-marker)
+          [present? v validation-epoch] (fetch "epoch" load-marker 1000000 10000)]
+      (is (not present?))
+      (is (= load-marker v))
+      (is (= 4 validation-epoch))))
   (testing "load marker is not set if there is a value already"
     (let [_ (util/add-entry "B" (loader/cval 1))
           load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "B") load-marker 1000000 10000)]
+          [present? v] (fetch "B" load-marker 1000000 10000)]
       (is present?)
       (is (= 1 v))
       (is (= 1 (util/get-entry "B")))))
   (testing "load marker fade is respected"
     (let [load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "C") load-marker 1 10000)]
+          [present? v] (fetch "C" load-marker 1 10000)]
       (is (not present?))
       (is (= load-marker v))
       (Thread/sleep 10)
       (is (= nil (util/get-entry "C")))))
   (testing "load marker fade is not renewed on access"
-    (let [_ (loader/fetch {} (util/test-key "D") (loader/new-load-marker) 1000 10000)
+    (let [_ (fetch "D" (loader/new-load-marker) 1000 10000)
           load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "D") load-marker 1000 10000)]
+          [present? v] (fetch "D" load-marker 1000 10000)]
       (is present?)
       (is (other-load-marker? v load-marker))
       (is (other-load-marker? (util/get-entry "D") load-marker))
       (Thread/sleep 500)
-      (loader/fetch {} (util/test-key "D") load-marker 1000 10000)
+      (fetch "D" load-marker 1000 10000)
       (Thread/sleep 750)
       (is (= nil (util/get-entry "D")))))
   (testing "fade is refreshed if normal value is there"
     (let [_ (car/wcar {} (car/set (util/test-key "E") "ABC" "PX" 1000))
           load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "E") load-marker 1000 1000)]
+          [present? v] (fetch "E" load-marker 1000 1000)]
       (is present?)
       (is (= "ABC" v))
       (Thread/sleep 500)
-      (loader/fetch {} (util/test-key "E") load-marker 1000 1000)
+      (fetch "E" load-marker 1000 1000)
       (Thread/sleep 750)
       (is (= "ABC" (util/get-entry "E")))))
   (testing "fetch missing key without putting a load marker"
     (let [load-marker (loader/new-load-marker)
-          [present? v] (loader/fetch {} (util/test-key "missing") load-marker -1 nil)]
+          [present? v] (fetch "missing" load-marker -1 nil)]
       (is (not present?))
       (is (= v nil))
       (is (= nil (util/get-entry "missing"))))))

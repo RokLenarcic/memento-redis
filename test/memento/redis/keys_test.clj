@@ -41,13 +41,13 @@
 (deftest epoch-key-test
   (let [kg util/test-keygen
         cache-name ""
-        segment (memento.base.Segment. identity identity :memento.redis/epoch {})
+        segment (memento.base.Segment. identity identity "e" {})
         entry-key (keys/entry-key kg cache-name segment [1])
         epoch-key (keys/epoch-key kg cache-name)
         tag-epochs-key (keys/tag-epochs-key kg cache-name)]
-    (is (= [util/prefix cache-name :memento.redis/epoch] epoch-key))
-    (is (= [util/prefix cache-name :memento.redis/tag-epochs] tag-epochs-key))
-    (is (= [util/prefix cache-name :memento.redis/epoch [1]] entry-key))
+    (is (= [util/prefix cache-name "e"] epoch-key))
+    (is (= [util/prefix cache-name "t"] tag-epochs-key))
+    (is (= [util/prefix cache-name "e" [1]] entry-key))
     (is (not= epoch-key entry-key))
     (is (keys/entry-key? kg cache-name entry-key))
     (is (not (keys/entry-key? kg cache-name epoch-key)))
@@ -58,3 +58,43 @@
       (car/set entry-key 1))
     (is (= #{epoch-key tag-epochs-key entry-key}
            (set (car/wcar {} (car/keys (keys/cache-wildcard-key kg cache-name))))))))
+
+(deftest wildcard-exact-length-test
+  (testing "wildcard-exact-length matches only one-deeper descendants"
+    (create-v util/prefix {[1 2] 7
+                           [1 2 3] 4
+                           [1 2 3 4] 9
+                           ["A" "B"] 1})
+    (is (= [[util/prefix 1 2 3]]
+           (car/wcar {} (car/keys (keys/wildcard-exact-length (list util/prefix 1 2))))))
+    (is (= [[util/prefix 1 2]]
+           (car/wcar {} (car/keys (keys/wildcard-exact-length (list util/prefix 1)))))))
+  (testing "throws when target count byte is a glob metachar"
+    (are [target-count] (thrown? clojure.lang.ExceptionInfo
+                                 (keys/wildcard-exact-length
+                                   (apply list (repeat (dec target-count) :x))))
+      42 63 91 92)))
+
+(deftest segment-wildcard-no-epoch-collision-test
+  (testing "segment-wildcard-key with segment id \"e\" does not match epoch-key"
+    (let [kg util/test-keygen
+          cname "C"
+          seg-e (memento.base.Segment. identity identity "e" {})
+          seg-t (memento.base.Segment. identity identity "t" {})
+          epoch-k (keys/epoch-key kg cname)
+          tag-epochs-k (keys/tag-epochs-key kg cname)
+          entry-k-e (keys/entry-key kg cname seg-e [1])
+          entry-k-t (keys/entry-key kg cname seg-t [2])]
+      (car/wcar {}
+        (car/set epoch-k 1)
+        (car/set tag-epochs-k 1)
+        (car/set entry-k-e 1)
+        (car/set entry-k-t 1))
+      (is (= [entry-k-e]
+             (car/wcar {} (car/keys (keys/segment-wildcard-key kg cname seg-e)))))
+      (is (= [entry-k-t]
+             (car/wcar {} (car/keys (keys/segment-wildcard-key kg cname seg-t)))))
+      (is (not (keys/segment-key? kg cname seg-e epoch-k)))
+      (is (not (keys/segment-key? kg cname seg-t tag-epochs-k)))
+      (is (keys/segment-key? kg cname seg-e entry-k-e))
+      (is (keys/segment-key? kg cname seg-t entry-k-t)))))

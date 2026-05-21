@@ -4,6 +4,14 @@
 
 - Update for Memento 2.1.x invalidation epoch APIs.
 - Add Redis cache epoch key helpers for upcoming Redis-authoritative tag invalidation.
+- Tag-aware invalidation is now Redis-authoritative: a per-cache epoch counter and
+  per-tag-id epoch hash are kept in Redis, and loaders consult them in the
+  finish-load Lua script. A load whose tags were invalidated mid-flight is
+  rejected and joiners re-loop instead of caching a stale value.
+- Pub/Sub invalidation channel bumped to `mem-redis-inval-v2` to accommodate the
+  new payload shape. Rolling restarts across this version boundary will see
+  invalidations propagate only within each cohort until the cutover completes;
+  on-disk entry format is unchanged.
 
 ## 1.0.24
 

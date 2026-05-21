@@ -46,19 +46,18 @@
         new-timestamps))))
 
 (defonce daemon-thread
-          (delay
-            (.addListener TagInvalidation/INSTANCE
-                          (reify TagInvalidation$Listener
-                            (startInvalidation [this items epoch-map]
-                              (listener/event-start items epoch-map)
-                              (Loader/addInvalidations loader/maint items))
-                            (endInvalidation [this items epoch-map]
-                              (listener/event-end items epoch-map))))
-           (doto
-             (Thread. ^Runnable (fn []
-                                  (loop [action-timestamps {}]
-                                    (Thread/sleep ^long sleep-interval)
-                                    (recur (perform-step action-timestamps))))
-                      "Memento Daemon")
-             (.setDaemon true)
-             (.start))))
+  (delay
+    (.addListener TagInvalidation/INSTANCE
+                  (reify TagInvalidation$Listener
+                    (startInvalidation [this items epoch]
+                      (listener/event-start items epoch)
+                      (Loader/addInvalidations loader/maint items))
+                    (endInvalidation [this items epoch]
+                      (listener/event-end epoch))))
+    (doto (Thread. ^Runnable (fn []
+                               (loop [action-timestamps {}]
+                                 (Thread/sleep ^long sleep-interval)
+                                 (recur (perform-step action-timestamps))))
+                   "Memento Daemon")
+      (.setDaemon true)
+      (.start))))

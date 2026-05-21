@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [memento.base :as b]
             [memento.config :as mc]
+            [memento.redis.keys :as keys]
             [memento.redis.listener :as listener]
             [memento.redis.sec-index :as sec-index]
             [taoensso.nippy :as nippy]
@@ -150,10 +151,10 @@
   type template in an IF
 
   fade-ms is fade setting for entries in ms if any"
-  [conn k load-marker load-ms fade-ms]
+  [conn k epoch-key load-marker load-ms fade-ms]
   (car/wcar conn
     (car/lua fetch-script
-             {:k k}
+             {:k k :epoch-key epoch-key}
              {:fade-ms (if fade-ms fade-ms -1)
               :load (if (and load-ms (pos-int? load-ms)) 1 0)
               :load-marker load-marker
@@ -167,13 +168,16 @@
   (reify LoaderSupport
     (newLoadMarker [this] (new-load-marker))
     (isLoadMarker [this o] (instance? LoadMarker o))
-    (fetchEntry [this conn k load-marker load-ms fade-ms]
-      (fetch conn k load-marker load-ms fade-ms))
-    (completeLoad [this conn key-list v load-marker expire]
-      (let [values {:load-marker load-marker :v (cval v) :ttl-ms (or expire -1)}]
+    (fetchEntry [this conn cname kg k load-marker load-ms fade-ms]
+      (fetch conn k (keys/epoch-key kg cname) load-marker load-ms fade-ms))
+    (completeLoad [this conn key-list v load-marker expire validation-epoch]
+      (let [values {:load-marker load-marker
+                    :v (cval v)
+                    :ttl-ms (or expire -1)
+                    :validation-epoch (or validation-epoch -1)}]
         (if (= 1 (count key-list))
-          (= 1 (car/wcar conn (car/lua finish-load-script {:k (first key-list)} values)))
-          (let [ret (= 1 (car/wcar conn (car/lua sec-index/finish-load-script key-list values)))]
+          (car/wcar conn (car/lua finish-load-script {:k (first key-list)} values))
+          (let [ret (car/wcar conn (car/lua sec-index/finish-load-script key-list values))]
             (.put sec-index/all-indexes [conn (second key-list)] true)
             ret))))
     (abandonLoad [this conn key load-marker]

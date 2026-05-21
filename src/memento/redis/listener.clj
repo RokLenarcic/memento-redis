@@ -15,7 +15,12 @@
   "Conn -> listener"
   (ConcurrentHashMap. (int 4) (float 0.75) (int 8)))
 
-(def channel "mem-redis-inval")
+(def channel
+  ;; Bumped from "mem-redis-inval" when the wire payload changed from
+  ;; [action invalidation-uuid items] to [action epoch-long items]. Old nodes
+  ;; on the v1 channel would crash on the new payload; v2 isolates the cohorts
+  ;; during a rolling restart across the upgrade boundary.
+  "mem-redis-inval-v2")
 
 (def tag-invalidation TagInvalidation/INSTANCE)
 
@@ -48,32 +53,25 @@
     nil)
   nil)
 
-(defn event-start [items epoch-map]
-  ;; if we already had an invalidation in a map, then this event was caused
-  ;; process-msg above (or by duplicates, see above)
-  (doseq [item items
-          :let [epoch (get epoch-map item)]
-          :when epoch]
-    (when-not (.putIfAbsent invalidations epoch [Long/MAX_VALUE items])
-      ;; otherwise post to remote that we started an invalidation
-      (run! (fn [conn]
-              (car/wcar conn
-                (car/publish channel [:start epoch items])))
-            (keys listeners)))))
+(defn event-start [items epoch]
+  ;; if we already had an invalidation in the local map, then this event was caused
+  ;; by process-msg above (foreign-originated) or by a prior local start (duplicates).
+  (when-not (.putIfAbsent invalidations epoch [Long/MAX_VALUE items])
+    ;; otherwise post to remote that we started an invalidation
+    (run! (fn [conn]
+            (car/wcar conn
+              (car/publish channel [:start epoch items])))
+          (keys listeners))))
 
-(defn event-end [items epoch-map]
+(defn event-end [epoch]
   ;; if this event was caused by process-msg above then the invalidation will have been removed already
   ;; so ignore that case.
   (try
-    (doseq [epoch (or (seq (keep #(get epoch-map %) items))
-                       (seq (keep (fn [[epoch [_ stored-items]]]
-                                    (when (= items stored-items) epoch))
-                                  (seq invalidations))))]
-      (when (.remove invalidations epoch)
-        (run! (fn [conn]
-                (car/wcar conn
-                  (car/publish channel [:end epoch])))
-              (keys listeners))))
+    (when (.remove invalidations epoch)
+      (run! (fn [conn]
+              (car/wcar conn
+                (car/publish channel [:end epoch])))
+            (keys listeners)))
     (catch Exception e
       (.printStackTrace e))))
 

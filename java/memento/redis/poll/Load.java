@@ -6,8 +6,8 @@ public class Load {
     private final SpecialPromise promise;
     private volatile Object loadMarker;
 
-    public Load(Object loadMarker) {
-        this.promise = new SpecialPromise();
+    public Load(Object loadMarker, long epoch) {
+        this.promise = new SpecialPromise(epoch);
         this.loadMarker = loadMarker;
     }
 

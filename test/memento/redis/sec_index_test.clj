@@ -37,18 +37,34 @@
   (let [_ (util/add-entry :xx 11)
         k (util/test-key :xx)
         id-key (keys/sec-index-id-key util/test-keygen "A" "B")
-        indexes-key (keys/sec-indexes-key util/test-keygen)]
+        indexes-key (keys/sec-indexes-key util/test-keygen)
+        epoch-key (keys/epoch-key util/test-keygen "A")
+        tag-epochs-key (keys/tag-epochs-key util/test-keygen "A")]
     (with-redefs [daemon/sec-index-interval 100000000000000]
       (car/wcar {} (add-to-index indexes-key id-key k))
       (is (= 1 (car/wcar {} (car/exists k))))
       (is (= 1 (car/wcar {} (car/exists indexes-key))))
       (is (= ['("MMRS-TEST" "A" "B")] (car/wcar {} (car/smembers indexes-key))))
       (is (= 1 (car/wcar {} (car/exists id-key))))
-      (sec-idx/invalidate-by-index {} indexes-key [id-key])
+      (is (= 1 (sec-idx/invalidate-by-index {} indexes-key epoch-key tag-epochs-key [id-key])))
       (is (= 0 (car/wcar {} (car/exists k))))
       (is (= 0 (car/wcar {} (car/exists indexes-key))))
       (is (= [] (car/wcar {} (car/smembers indexes-key))))
-      (is (= 0 (car/wcar {} (car/exists id-key)))))))
+      (is (= 0 (car/wcar {} (car/exists id-key))))
+      (is (= "1" (car/wcar {} (car/hget tag-epochs-key id-key)))))))
+
+(deftest invalidate-by-index-epoch-test
+  (let [indexes-key (keys/sec-indexes-key util/test-keygen)
+        epoch-key (keys/epoch-key util/test-keygen "A")
+        tag-epochs-key (keys/tag-epochs-key util/test-keygen "A")
+        id-key-1 (keys/sec-index-id-key util/test-keygen "A" "B")
+        id-key-2 (keys/sec-index-id-key util/test-keygen "A" "C")]
+    (is (= 1 (sec-idx/invalidate-by-index {} indexes-key epoch-key tag-epochs-key [id-key-1 id-key-2])))
+    (is (= {id-key-1 "1" id-key-2 "1"}
+           (apply hash-map (car/wcar {} (car/hgetall tag-epochs-key)))))
+    (is (= 2 (sec-idx/invalidate-by-index {} indexes-key epoch-key tag-epochs-key [id-key-1])))
+    (is (= {id-key-1 "2" id-key-2 "1"}
+           (apply hash-map (car/wcar {} (car/hgetall tag-epochs-key)))))))
 
 (deftest removed-expired-keys-test
   (let [l (ConcurrentHashMap.)
