@@ -4,11 +4,34 @@ Memento cache backed by Redis. The underlying library is Carmine (refer to their
 
 Offers **guarantees that a cache entry is calculated only once even if using multiple JVMs**.
 
+## ⚠ Upgrade Warning: 2.0.x Requires Dropping Existing Redis Cache
+
+`memento-redis 2.0.x` changes the Redis wire format used for cache entries,
+load markers, and tag-invalidation metadata. Existing Redis keys written by
+`memento-redis 1.x` (or earlier) must be removed before running the new
+version, otherwise old cache contents may be unreadable or interpreted
+incorrectly.
+
+This only deletes cached data; values will be recomputed on demand.
+
+Use the built-in nuke helper from an application process configured with the
+same Redis connection and key generator that the cache uses:
+
+```clojure
+(require '[memento.redis :as mr])
+
+;; Pass any memoized function that uses the Redis cache you want to clear.
+(mr/nuke!! #'your.memoized/function)
+```
+
+If you use multiple Redis databases, multiple Carmine connections, or custom
+`:memento.redis/keygen` values, run this once per Redis cache / key schema.
+
 Memento version compatibility
 
 | Memento | Memento Redis |
 |---------|---------------|
-| 2.1.x   | 1.1.x         |
+| 2.1.x   | 2.0.x         |
 | 2.0.x   | 1.0.x         |
 | 1.4.x   | 0.5.x         |
 | 1.3.x   | 0.4.x         |

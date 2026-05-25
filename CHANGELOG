@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.x
+
+- **Breaking: Redis wire format has changed.** Existing cache entries written
+  by 1.x are not readable by 2.0.x and must be dropped before upgrading.
+  Use `(memento.redis/nuke!! #'your.memoized/function)` from an application
+  process configured with the same Redis connection and key generator as the
+  cache. Run once per distinct connection / `:memento.redis/keygen`. Only
+  cached data is removed; values are recomputed on demand. See the README
+  "Upgrade Warning" section for details.
+- Requires Memento 2.1.74 or later.
+- Cached `nil` values now round-trip correctly and remain visible in `as-map`.
+- `if-cached` no longer blocks on in-flight loads and no longer rethrows
+  loader exceptions; it returns the absent sentinel when no completed entry
+  is available.
+- Same-JVM callers arriving while a load is in flight now reliably coalesce
+  onto the in-flight load instead of starting a redundant one.
+- Improved cleanup of load markers and tag-invalidation metadata on
+  invalidation and on stale-tag rejection.
+
 ## 1.1.30
 
 - Update for Memento 2.1.x invalidation epoch APIs.

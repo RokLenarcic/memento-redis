@@ -1,170 +1,144 @@
-# Future Work: Authoritative Cross-Process Tag Invalidation
+# Redis Tag Invalidation Design
 
-## Status
+**Status:** Implemented.
 
-Open design item. Not a defect in current behavior, but a known limitation
-of the present pubsub-mediated invalidation model.
+This document describes the current memento-redis tag invalidation model.
 
-## Background — three veto layers
+## Summary
 
-memento-redis currently has three independent mechanisms for preventing a
-stale value from being served after a tag invalidation:
+Redis tag invalidation relies on two mechanisms:
 
-| Layer | Where it lives                                              | What it catches                                                                                                            |
-| ----- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| L1    | Redis `tag_epochs_key` + `finish-load-w-sec.lua`            | A loader that captured `validation_epoch = E` and then tries to finish a `set` after some tag's epoch has been bumped past `E`. The script returns `-1`; the loader rejects its own publication. |
-| L2    | In-JVM `memento.base.TagInvalidation`                       | An in-flight load whose `deliver(...)` call happens while a same-JVM invalidation is "open" (between `startInvalidation` and `endInvalidation`). `SpecialPromise.deliver` consults `lastInvalidatedEpoch` and refuses to publish. |
-| L3    | `listener.clj` pubsub: `[:start epoch items]` / `[:end ...]` | Bridges cross-JVM invalidation events into each JVM's local `TagInvalidation`, so foreign JVMs' in-flight loads also veto themselves. |
+| Mechanism | Purpose |
+| --- | --- |
+| Secondary indexes | Remove already-stored tagged entries during invalidation. |
+| Redis tag epochs | Reject tagged loads that started before an invalidation but finish after it. |
 
-L1 is **Redis-authoritative** — it sees the up-to-date epoch the moment any
-process's `sec-index-invalidate.lua` runs.
+Stored tagged entries are not revalidated on read. If a tagged value is present in Redis, readers serve it. The invariant is that tag invalidation removes already-indexed entries atomically, and in-flight loaders that were not yet indexed are rejected at completion time.
 
-L2 is **in-JVM concurrency** — it is the guard for loaders whose `deliver`
-step has not yet happened. It is updated cross-process only via L3.
+## Redis Keys
 
-L3 is **eventually consistent** — pubsub may be delayed, drop messages on
-connection blips, or arrive after the local process has already served reads.
+- `epoch_key`: cache-wide Redis string incremented by `sec-index-invalidate.lua` on every tag invalidation for that cache.
+- `tag_epochs_key`: Redis hash mapping each secondary-index tag key to the `epoch_key` value observed when that tag was last invalidated.
+- `indexes_key`: Redis set containing secondary-index set keys known for a cache/key generator.
+- `id_key`: Redis set for one tag identifier, containing entry keys associated with that tag.
 
-## The gap (M1)
+Redis stores numbers as strings. Lua receives `INCR` results as numbers and `GET`/`HGET` results as strings, so scripts convert read values with `tonumber` when comparing epochs.
 
-`Loader.get` has a "hit" branch (the `fetch.lua` claim found an existing
-cached value in Redis):
+## Entry Value Protocol
 
-```java
-// there's a cached value, remove the load and return it if valid, otherwise absent
-loads.remove(key, newLoad);
-cachedVal = markCached(cachedVal);
-return p.deliver(cachedVal, latestTagInvalidation(cachedVal)) ? EntryMeta.unwrap(cachedVal) : EntryMeta.absent;
-```
+Every value stored under a cache entry key starts with one discriminator byte:
 
-`latestTagInvalidation(cachedVal)` consults only L2 — the local in-JVM
-`TagInvalidation`. It does **not** read Redis's `tag_epochs_key`. So:
+| Byte | Shape | Layout |
+| --- | --- | --- |
+| `0x01` | Untagged value | `[0x01][nippy(value)]` |
+| `0x02` | Tagged value | `[0x02][nippy(tagIdents)][nippy(value)]` |
+| `0x03` | Load marker | `[0x03][16 bytes UUID]` |
 
-* `fetch.lua` returns `{true, value, 0}` on a hit without reading any tag
-  epoch — see `src/memento/redis/fetch.lua`.
-* The Java side has no per-entry write epoch stored alongside `value` that
-  it could compare a freshly-read `tag_epochs_key[t]` against, even if it
-  did read it.
-* If Process A invalidates tag `T`, then Process B (with a delayed pubsub)
-  serves a hit for a value tagged `T` — Process B has no way to know
-  the tag was invalidated. It returns the stale value.
+`EntryMeta` is not stored directly. `EntryEnvelope.writeEnvelope` unwraps it before serialization:
 
-The window is the L3 propagation delay. Under healthy pubsub this is
-sub-millisecond; under stress, network blips, or subscriber backpressure
-it can be longer, and missed messages effectively make the window
-permanent until something else (TTL, segment invalidate) evicts the entry.
+- untagged values store just the user value;
+- tagged values store tag identifiers and the user value;
+- no-cache values are not stored.
 
-## Why L2 still exists despite L1
+Redis tagged envelopes do not serialize a write epoch. Redis epochs are used only for in-flight load completion checks.
 
-L2 catches paths that never reach `finish-load-w-sec.lua`:
+## Load Markers
 
-1. **`EntryMeta.isNoCache()` branch in `Loader.get`** — the loader publishes
-   the value via the promise (joiners receive it) and calls `abandonLoad`;
-   `completeLoad` is never invoked, so L1 has no chance to veto.
-2. **Same-JVM sibling caches** (e.g. a sibling Caffeine memento cache in the
-   same JVM sharing tag idents) consume `TagInvalidation` directly. L3 is
-   their only signal that an invalidation originating in Redis has begun.
-3. **Same-JVM in-flight loads** between `startInvalidation` and
-   `completeLoad` are caught by L2 at `deliver` time; L1 would catch the
-   subsequent `completeLoad` too, but L2 lets the loader abandon earlier
-   (no Redis script round-trip).
+Load markers prevent multiple processes from publishing different values for the same miss.
 
-So L2 is not redundant with L1 — they cover different sub-paths and L2
-also services sibling backends.
+- `fetch.lua` installs `[0x03][uuid-bytes]` with a short TTL when a loader claims a missing key.
+- Other callers seeing a load marker wait through the local/cross-JVM maintenance path rather than running the user function.
+- `finish-load.lua` and `finish-load-w-sec.lua` only publish if the marker under the entry key still matches the loader's marker.
+- `abandon-load.lua` deletes the marker only if it still matches the loader's marker.
 
-## Proposed remediation — store per-entry write epoch and revalidate inline
+Lua scripts classify load markers by checking byte 1 for `0x03`. Java uses `Load.isLoadMarker` for the full byte-array predicate.
 
-Make Redis the authority on the hit path too, by:
+## Invalidation Script
 
-1. **Capture write epoch on completion.** When a loader's `completeLoad`
-   succeeds, the value written into `k` includes the `validation_epoch`
-   that was captured at `fetch.lua` time (now known to be safe, since
-   `finish-load-w-sec.lua` already verified `tag_epoch <= validation_epoch`
-   for every tag).
+`sec-index-invalidate.lua` is authoritative for already-stored tagged values:
 
-   Concretely, extend the value envelope. Today `cval` serializes
-   `EntryMeta` (or raw value) to bytes via Nippy. Add a `writeEpoch` long
-   to the envelope, populated from the `validation-epoch` argument to
-   `completeLoad`.
+1. Increment `epoch_key`.
+2. For each invalidated `id_key`, write the new epoch into `tag_epochs_key`.
+3. Read all entry keys from that secondary-index set.
+4. Delete those entries.
+5. Delete the secondary-index set.
+6. Remove the secondary-index set from `indexes_key`.
 
-2. **Revalidate inline in `fetch.lua` on hit.** When the script finds an
-   existing value, in addition to returning the value it must also return
-   either (a) the current `epoch_key` value, or (b) the `tag_epochs_key`
-   hash entries relevant to this entry's tags.
+Redis executes the script atomically. No other Redis command observes a partially-cleaned index. Therefore, an already-stored tagged entry that was indexed before invalidation should be gone after invalidation completes.
 
-   Option (a) is cheaper (one `get` already in scope), but requires the
-   Java side to do the per-tag lookup separately or trust a coarse
-   "any-tag-bumped" signal. Option (b) needs the entry's tag list to be
-   known by the script — currently it isn't. The compromise: return
-   the current `epoch_key` value as the third element on the hit path
-   (instead of the placeholder `0` that the post-H1 fix returns), and
-   have the Java side decide whether to do further work.
+## In-Flight Load Rejection
 
-3. **Compare in Java.** After `fetch.lua` returns `{true, value, current_epoch}`,
-   parse the entry's `writeEpoch` from the envelope and its `tagIdents`
-   from the `EntryMeta`. If `current_epoch > writeEpoch`, issue an
-   `HMGET tag_epochs_key tag1 tag2 ...` to determine whether any of the
-   entry's tags was bumped past `writeEpoch`. If yes, treat the hit as a
-   miss (return `EntryMeta.absent`, let the caller re-loop and load
-   afresh).
+Secondary-index deletion cannot remove a value that has not been written yet. Tag epochs exist to catch that race.
 
-   The `current_epoch > writeEpoch` pre-check makes the extra `HMGET` rare
-   in the steady state — only after any invalidation has happened since
-   this entry was written.
+Flow:
 
-### Trade-offs
+1. `fetch.lua` claims a missing key with a load marker and returns the current `epoch_key` as `validation_epoch`.
+2. The user function runs and eventually returns a tagged value.
+3. `finish-load-w-sec.lua` checks each returned tag's epoch in `tag_epochs_key`.
+4. If any `tag_epoch > validation_epoch`, the load is stale.
+5. The script deletes the load marker and returns `-1`.
+6. `Loader.get` rejects the promise result so local joiners re-loop and reload.
 
-* **Envelope change is backwards-incompatible** for cached values written
-  by older versions. Either run a migration (touch each value, or just
-  let TTLs evict old entries), or include a version byte at the front of
-  the envelope and treat versionless entries as having `writeEpoch = -inf`
-  (i.e., always revalidate on first read after upgrade).
-* **Extra `HMGET` on cold reads after invalidation** — bounded by the
-  number of tags on the entry, typically small.
-* **Removes pubsub from the critical path for cross-process tag
-  invalidation correctness.** Pubsub still serves L2 for in-flight
-  same-JVM loads and sibling caches, but a missed pubsub message no
-  longer causes stale hits to be served indefinitely.
+This is the only Redis epoch comparison on the tagged value path.
 
-### Alternative: best-effort revalidate via local epoch counter
+## Read Path
 
-A lighter intermediate step: have `fetch.lua` always return the current
-`epoch_key` value on hit. Each cache instance tracks its last-seen
-`epoch_key`. On observing a bumped epoch, refresh the local
-`TagInvalidation` from a fresh `HGETALL tag_epochs_key`.
+`Loader.get` and `Loader.ifCached` read cached values directly:
 
-This closes the pubsub-gap window probabilistically (any read recovers
-missed invalidations) without changing the value envelope. It is still
-not strictly authoritative — a concurrent invalidate between the
-`fetch.lua` return and the `lastInvalidatedEpoch` call can slip
-through — but the window shrinks from "pubsub propagation latency" to
-"one Java method call." For many deployments this is enough.
+- `fetch.lua` returns either a raw value envelope, a load marker, or a miss.
+- Java dispatches by the first byte.
+- `0x01` and `0x02` envelopes are decoded with `EntryEnvelope.readEnvelope`.
+- `0x03` is treated as an in-flight foreign load.
+- Unknown discriminators are deleted defensively by `get`/shared dispatch to avoid livelock.
 
-## Scope of work for the full fix
+Reads do not compare `currentEpoch` with a stored `writeEpoch`, because stored tagged entries no longer carry write epochs. Already-written stale tagged entries are handled by secondary-index deletion; in-flight stale tagged entries are handled by `finish-load-w-sec.lua`.
 
-* `src/memento/redis/loader.clj` — `cval` / value envelope to include
-  `writeEpoch`.
-* `src/memento/redis/fetch.lua` — return current `epoch_key` on the hit
-  branch; document the three-element contract.
-* `java/memento/redis/poll/Loader.java` — parse `writeEpoch`, compare
-  against returned current epoch, optionally issue `HMGET` against
-  `tag_epochs_key`, treat as miss when stale.
-* `java/memento/redis/poll/LoaderSupport.java` — possibly a new method
-  for the bulk tag-epoch read.
-* Tests: cross-JVM test (or simulated two-listener setup) where pubsub
-  is suppressed to verify the hit-path revalidation rejects stale
-  values.
+## ifCached
 
-## Acceptance criteria
+`ifCached` uses `LoaderSupport.fetchCachedEntry`, an observation-only wrapper around `fetch.lua` with `load=0`.
 
-A read on Process B that occurs **after** Process A has completed a tag
-invalidation must return either the new (post-invalidation) value or
-`absent`, regardless of pubsub state. The current behavior — returning
-the pre-invalidation value until pubsub catches up — is the bug.
+This means:
 
-## Out of scope
+- a miss never installs a load marker;
+- a value hit can refresh fade, matching normal cache hit behavior;
+- a load marker returns `EntryMeta.absent` immediately;
+- tagged values use the same decode/dispatch path as `get`.
 
-* Authoritative invalidation for `EntryMeta.isNoCache()` (the value never
-  reaches Redis; L2 + L3 remain the only veto).
-* Sibling-cache (e.g. Caffeine) consumption of `TagInvalidation` — that
-  continues to rely on L3.
+`car/parse-raw` decodes Lua `true` as `1` and Lua `false` as `nil`, so Java checks the first returned element for non-null rather than comparing to `Boolean.TRUE`.
+
+## addEntries / putValue
+
+`RedisCache.addEntries` delegates to `Loader.putEntries`.
+
+`Loader.putEntries`:
+
+- maps user args to Redis entry keys;
+- passes raw values to `EntryEnvelope.writeEnvelope`; tagged `EntryMeta` values keep their tag identifiers;
+- sends tagged entries one-by-one through `LoaderSupport.putValue`, which writes the value and secondary indexes atomically with `put-value-w-sec.lua`;
+- groups untagged entries by expiry and writes them in batches via `LoaderSupport.putValues` and `bulk-set.lua`.
+
+`put-value-w-sec.lua` does not touch epochs. Explicit tagged writes are immediately indexed, so later invalidations can delete them through secondary indexes.
+
+## Maintenance Path
+
+The maintenance daemon handles local promises waiting on foreign load markers.
+
+- It refreshes this JVM's own load markers when requested.
+- It tracks foreign waiters as `[entry-key, Load]` pairs, so a maintenance result can only complete the same `Load` that was observed before the Redis fetch.
+- It uses `cached-entries.lua` to check the entry keys owned by foreign loaders.
+- `cached-entries.lua` reports each key as still a load marker, absent, or raw value bytes.
+- Clojure drops still-in-flight load-marker results, decodes value bytes with `EntryEnvelope.readEnvelope`, and returns `[key, load, delivery]` triples for terminal results.
+- Maintenance completes a waiter only if `loads-map.remove(key, load)` succeeds. This identity check prevents a stale maintenance result from completing a newer replacement `Load` for the same key.
+- Tagged values are delivered to `SpecialPromise` as `EntryMeta`, so `SpecialPromise.deliver` can inspect tag identifiers before `Loader.await` unwraps the user value.
+
+No read-time tag epoch check happens in maintenance; the same stored-entry invariant applies.
+
+## Why Local TagInvalidation Still Exists
+
+The JVM-local `TagInvalidation` model still protects in-process timing windows:
+
+- same-JVM invalidations can reject `SpecialPromise.deliver` before Redis completion;
+- same-JVM sibling caches can react to tag invalidations;
+- Redis pubsub bridges invalidation start/end events into other JVMs' local invalidation clocks.
+
+Redis tag epochs are the cross-process authoritative guard for stale in-flight tagged load completion. Secondary indexes are the authoritative guard for already-stored tagged entries.

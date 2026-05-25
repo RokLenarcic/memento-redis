@@ -62,13 +62,13 @@
             [(str inc) [2]] 3
             [(str inc) [3]] 4
             [(str inc) [4]] 5}
-           (b/as-map (active-cache memod))))
+           (util/unwrap-as-map (b/as-map (active-cache memod)))))
     (is (= {[0] 1
             [1] 2
             [2] 3
             [3] 4
             [4] 5}
-           (as-map memod)))))
+           (util/unwrap-as-map (as-map memod))))))
 
 (deftest cache-clear-removes-epoch-metadata-test
   (let [c (create inf)
@@ -139,19 +139,19 @@
       (is (= 13 (mine 1 2 10)))
       (is (= 13 (mine 10 2 1)))
       (is (= 13 (mine 10 2 10)))
-      (is (= {[2 10] 13, [2 1] 13} (as-map mine))))))
+      (is (= {[2 10] 13, [2 1] 13} (util/unwrap-as-map (as-map mine)))))))
 
 (deftest put-all-test
   (let [f (memo inc inf)]
     (memo-add! f {[1] 100})
-    (is (= {[1] 100} (as-map f)))
+    (is (= {[1] 100} (util/unwrap-as-map (as-map f))))
     (is (= 100 (util/get-entry* f [1])))))
 
 (deftest put-all-test
   ;; TODO PUTALL with expire
   (let [f (memo inc inf)]
     (memo-add! f {[1] 100})
-    (is (= {[1] 100} (as-map f)))
+    (is (= {[1] 100} (util/unwrap-as-map (as-map f))))
     (is (= 100 (util/get-entry* f [1])))
     (is (= 100 (f 1)))
     (memo-add! f {[2] (with-tag-id 200 :my-tag 1)})
@@ -163,25 +163,25 @@
         generate (fn [] (f 1) (f 2) (g 1) (g 2))]
     (testing "individual clear"
       (generate)
-      (is (= {[1] 2 [2] 3} (as-map f)))
-      (is (= {[1] 0 [2] 1} (as-map g)))
+      (is (= {[1] 2 [2] 3} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 0 [2] 1} (util/unwrap-as-map (as-map g))))
       (memo-clear! f 1)
-      (is (= {[2] 3} (as-map f)))
-      (is (= {[1] 0 [2] 1} (as-map g))))
+      (is (= {[2] 3} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 0 [2] 1} (util/unwrap-as-map (as-map g)))))
     (testing "function clear"
       (generate)
-      (is (= {[1] 2 [2] 3} (as-map f)))
-      (is (= {[1] 0 [2] 1} (as-map g)))
+      (is (= {[1] 2 [2] 3} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 0 [2] 1} (util/unwrap-as-map (as-map g))))
       (memo-clear! f)
-      (is (= {} (as-map f)))
-      (is (= {[1] 0 [2] 1} (as-map g))))
+      (is (= {} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 0 [2] 1} (util/unwrap-as-map (as-map g)))))
     (testing "cache clear"
       (generate)
-      (is (= {[1] 2 [2] 3} (as-map f)))
-      (is (= {[1] 0 [2] 1} (as-map g)))
+      (is (= {[1] 2 [2] 3} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 0 [2] 1} (util/unwrap-as-map (as-map g))))
       (memo-clear-cache! (active-cache f))
-      (is (= {} (as-map f)))
-      (is (= {} (as-map g))))))
+      (is (= {} (util/unwrap-as-map (as-map f))))
+      (is (= {} (util/unwrap-as-map (as-map g)))))))
 
 (deftest if-cached-test
   (let [f (memo inc inf)
@@ -191,6 +191,33 @@
       (generate)
       (is (= 3 (b/if-cached (active-cache f) (.segment f) (seq [2]))))
       (is (= b/absent (b/if-cached (active-cache f) (.segment f) (seq [5])))))))
+
+(deftest if-cached-miss-does-not-install-load-marker-test
+  (let [f (memo inc inf)]
+    (is (= b/absent (b/if-cached (active-cache f) (.segment f) (seq [5]))))
+    (is (nil? (util/get-entry* f [5])))))
+
+(deftest if-cached-local-load-returns-absent-test
+  (let [started (promise)
+        release (promise)
+        f (memo (fn [_]
+                  (deliver started true)
+                  @release
+                  2)
+                inf)
+        fut (future (f 1))]
+    @started
+    (is (= b/absent (b/if-cached (active-cache f) (.segment f) (seq [1]))))
+    (deliver release true)
+    (is (= 2 @fut))))
+
+(deftest if-cached-refreshes-fade-on-hit-test
+  (let [f (memo inc (dissoc (assoc inf mc/fade [500 :ms]) mc/ttl))]
+    (is (= 2 (f 1)))
+    (Thread/sleep 300)
+    (is (= 2 (b/if-cached (active-cache f) (.segment f) (seq [1]))))
+    (Thread/sleep 300)
+    (is (= 2 (util/get-entry* f [1])))))
 
 (deftest ttl-test
   (let [access-count (atom 0)
@@ -371,7 +398,118 @@
       [id-key])
     (memo-add! f {[1] (with-tag-id 100 :test-tag 1)})
     (is (= 100 (f 1)))
-    (is (= {[1] 100} (as-map f)))))
+    (is (= {[1] 100} (util/unwrap-as-map (as-map f))))))
+
+(deftest joiner-hit-mark-test
+  ;; §5.7/§5.9: joiners that block on SpecialPromise.await must observe the same
+  ;; :memento.redis/cached? hit-mark as direct-hit callers when hit-detect? is on.
+  (let [f (memo (fn [_] (Thread/sleep 500) {:v 1})
+                (assoc inf mr/hit-detect? true))
+        loader-fut (future (f 0))
+        _ (Thread/sleep 50)
+        joiner-fut (future (f 0))
+        loader-v @loader-fut
+        joiner-v @joiner-fut]
+    (is (= {:loader-val {:v 1}
+            :joiner-val {:v 1}
+            :loader-meta nil
+            :joiner-meta #:memento.redis{:cached? true}}
+           {:loader-val loader-v
+            :joiner-val joiner-v
+            :loader-meta (meta loader-v)
+            :joiner-meta (meta joiner-v)}))))
+
+(deftest nil-round-trip-test
+  ;; §5.4: nil values must survive a full cache round-trip (envelope discriminator
+  ;; preserves nil; absent → missing-key sentinel). The second call must not re-invoke.
+  (let [cnt (atom 0)
+        f (memo (fn [_] (swap! cnt inc) nil) inf)]
+    (is (= {:first nil :second nil :calls 1}
+            {:first (f 0) :second (f 0) :calls @cnt}))))
+
+(deftest as-map-keeps-nil-values-test
+  (let [f (memo (constantly nil) inf)]
+    (f 0)
+    (is (= {[0] nil} (util/unwrap-as-map (as-map f))))))
+
+(deftest stale-tagged-hit-reloads-test
+  ;; §5.5 / §5.8: a tagged 0x02 envelope already in Redis whose writeEpoch is
+  ;; older than the current tag epoch (i.e. a tag was invalidated after the
+  ;; entry was written) must be treated as a miss on the next read. The outer
+  ;; RedisCache.cached loop reloads and produces a fresh value; the stale
+  ;; envelope must NOT be returned and must not be silently deleted (no DEL on
+  ;; the hit slow-path — the new write replaces it).
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [_] (with-tag-id (swap! cnt inc) :st 1)) {} c)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)
+        id-key (keys/sec-index-id-key keygen cname [:st 1])]
+    ;; Populate: cnt=1, value 1 cached as tagged envelope.
+    (f 0)
+    ;; Bump tag epoch in Redis to invalidate the cached envelope without
+    ;; touching the entry key itself.
+    (sec-index/invalidate-by-index
+      {}
+      (keys/sec-indexes-key keygen)
+      (keys/epoch-key keygen cname)
+      (keys/tag-epochs-key keygen cname)
+      [id-key])
+    ;; Second call: slow-path stale check trips, outer loop reloads, cnt=2.
+    (is (= {:second 2 :third 2 :calls 2}
+           {:second (f 0) :third (f 0) :calls @cnt}))))
+
+(deftest multi-tag-any-stale-rejects-test
+  ;; §5.5: a value carrying multiple tag idents is stale if ANY one of those
+  ;; tag epochs is newer than the entry's writeEpoch. Bumping a single tag
+  ;; (here :mt2) must reject the entry; the unrelated tag :mt1 stays current.
+  (let [c (create inf)
+        cnt (atom 0)
+        f (bind (fn [_]
+                  (-> (swap! cnt inc)
+                      (with-tag-id :mt1 1)
+                      (with-tag-id :mt2 2)))
+                {}
+                c)
+        keygen (-> c :fns :keygen)
+        cname (:cname c)
+        id-key-mt2 (keys/sec-index-id-key keygen cname [:mt2 2])]
+    (f 0)
+    (sec-index/invalidate-by-index
+      {}
+      (keys/sec-indexes-key keygen)
+      (keys/epoch-key keygen cname)
+      (keys/tag-epochs-key keygen cname)
+      [id-key-mt2])
+    (is (= {:second 2 :calls 2}
+           {:second (f 0) :calls @cnt}))))
+
+(deftest tag-epochs-isolated-by-cache-name-test
+  ;; Tag epoch metadata is namespaced by cache name (epoch-key/tag-epochs-key
+  ;; both include cname). Invalidating tag :iso on cache A must not affect a
+  ;; load on cache B sharing the same tag identifier.
+  (let [ca (create (assoc inf mr/name "iso-A"))
+        cb (create (assoc inf mr/name "iso-B"))
+        cnt-a (atom 0)
+        cnt-b (atom 0)
+        fa (bind (fn [_] (with-tag-id (swap! cnt-a inc) :iso 1)) {} ca)
+        fb (bind (fn [_] (with-tag-id (swap! cnt-b inc) :iso 1)) {} cb)
+        keygen (-> ca :fns :keygen)
+        cname-a (:cname ca)
+        id-key-a (keys/sec-index-id-key keygen cname-a [:iso 1])]
+    (fa 0) (fb 0)
+    ;; Invalidate :iso on cache A only.
+    (sec-index/invalidate-by-index
+      {}
+      (keys/sec-indexes-key keygen)
+      (keys/epoch-key keygen cname-a)
+      (keys/tag-epochs-key keygen cname-a)
+      [id-key-a])
+    (is (= {:fa-second 2 :fb-second 1 :cnt-a 2 :cnt-b 1}
+           {:fa-second (fa 0)
+            :fb-second (fb 0)
+            :cnt-a @cnt-a
+            :cnt-b @cnt-b}))))
 
 (deftest var-expiry-test
   (testing "uses segment expiry"
@@ -382,8 +520,8 @@
       (f -1)
       (f2 1)
       (f2 -1)
-      (is (= {[-1] -1 [1] 1} (as-map f)))
-      (is (= {[-1] -1 [1] 1} (as-map f2)))
+      (is (= {[-1] -1 [1] 1} (util/unwrap-as-map (as-map f))))
+      (is (= {[-1] -1 [1] 1} (util/unwrap-as-map (as-map f2))))
       (Thread/sleep 1500)
-      (is (= {[-1] -1} (as-map f)))
-      (is (= {[1] 1} (as-map f2))))))
+      (is (= {[-1] -1} (util/unwrap-as-map (as-map f))))
+      (is (= {[1] 1} (util/unwrap-as-map (as-map f2)))))))

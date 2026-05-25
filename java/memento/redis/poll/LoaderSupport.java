@@ -3,6 +3,8 @@ package memento.redis.poll;
 import clojure.lang.IPersistentSet;
 import clojure.lang.IPersistentVector;
 
+import java.util.List;
+
 public interface LoaderSupport {
 
     /**
@@ -29,19 +31,26 @@ public interface LoaderSupport {
      */
     int COMPLETE_LOAD_STALE_TAG = -1;
 
-    /**
-     * Returns new LoadMarker
-     * @return
-     */
-    Object newLoadMarker();
-    boolean isLoadMarker(Object o);
-    IPersistentVector fetchEntry(Object conn, Object cacheName, Object keysGenerator, Object k, Object loadMarker, Object loadMs, Object fadeMs);
+    IPersistentVector fetchEntry(Object conn, Object k, Load load, Object loadMs, Object fadeMs);
 
-    int completeLoad(Object conn, IPersistentVector keys, Object val, Object loadMarker, Long expire, Long validationEpoch);
+    IPersistentVector fetchCachedEntry(Object conn, Object cacheName, Object keysGenerator, Object k, Object fadeMs);
 
-    void abandonLoad(Object conn, Object key, Object loadMarker);
+    int completeLoad(Object conn, IPersistentVector keys, Object value, Load load, Long expire);
+
+    void putValue(Object conn, Object cacheName, Object keysGenerator, Object key, Object value, Long expire);
+
+    void putValues(Object conn, List<Object> keys, List<Object> values, Long expire);
+
+    void abandonLoad(Object conn, Object key, Load load);
 
     IPersistentVector completeLoadKeys(Object cacheName, Object keysGenerator, Object key, IPersistentSet tagIdents);
 
     void ensureListener(Object conn);
+
+    /**
+     * Issue a {@code DEL key} against {@code conn}. Used by the corrupt-
+     * discriminator path in {@link Loader#get}'s hit branch for livelock
+     * prevention (§5.4.2).
+     */
+    void delEntry(Object conn, Object key);
 }

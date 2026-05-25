@@ -67,8 +67,11 @@
            (apply hash-map (car/wcar {} (car/hgetall tag-epochs-key)))))))
 
 (deftest removed-expired-keys-test
-  (let [l (ConcurrentHashMap.)
-        loader (Loader. "" util/test-keygen nil nil [1 :ms] [1 :ms] nil false l loader/support)
+  (let [n 1000
+        l (ConcurrentHashMap.)
+        ;; Use a generous TTL so the populate step doesn't race with expiry;
+        ;; we'll simulate expiry deterministically by DEL'ing the value keys.
+        loader (Loader. "" util/test-keygen nil nil [60 :s] [60 :s] nil false l loader/support)
         segment (Segment. #(-> %
                                (m/with-tag-id :y %)
                                (m/with-tag-id :t (str "W" %)))
@@ -77,19 +80,29 @@
                           {})
         entry-key #(util/test-key (str "T" %))
         index-key1 #(keys/sec-index-id-key util/test-keygen "" [:y %])
-        index-key2 #(keys/sec-index-id-key util/test-keygen "" [:t (str "W" %)])]
+        index-key2 #(keys/sec-index-id-key util/test-keygen "" [:t (str "W" %)])
+        indexes-key (keys/sec-indexes-key util/test-keygen)]
     (with-redefs [daemon/sec-index-interval 100000000000000]
-      (doseq [x (range 1000)]
+      (doseq [x (range n)]
         (.get loader {} segment (list x) (entry-key x)))
-      (is (= (into #{} (concat
-                         (map index-key1 (range 1000))
-                         (map index-key2 (range 1000))))
-             (into #{} (car/wcar {} (car/smembers (keys/sec-indexes-key util/test-keygen))))))
-      (is (= (map entry-key (range 1000)) (mapcat #(car/wcar {} (car/smembers (index-key1 %))) (range 1000))))
-      (is (= (map entry-key (range 1000)) (mapcat #(car/wcar {} (car/smembers (index-key2 %))) (range 1000))))
-      (sec-idx/removed-expired-keys {} (keys/sec-indexes-key util/test-keygen))
-      (sec-idx/removed-expired-keys {} (keys/sec-indexes-key util/test-keygen))
-      (is (= #{} (into #{} (car/wcar {} (car/smembers (keys/sec-indexes-key util/test-keygen)))))))))
+      (is (= {:indexes (into #{} (concat (map index-key1 (range n))
+                                         (map index-key2 (range n))))
+              :index-key1-members (set (mapcat #(car/wcar {} (car/smembers (index-key1 %))) (range n)))
+              :index-key2-members (set (mapcat #(car/wcar {} (car/smembers (index-key2 %))) (range n)))}
+             {:indexes (into #{} (car/wcar {} (car/smembers indexes-key)))
+              :index-key1-members (set (map entry-key (range n)))
+              :index-key2-members (set (map entry-key (range n)))}))
+      ;; Simulate expiry of all value keys; sec-index sets still hold the
+      ;; (now-dangling) references. removed-expired-keys samples 20 per call
+      ;; and recurses only when >20% expired, so loop until the master is empty.
+      (doseq [x (range n)]
+        (car/wcar {} (car/del (entry-key x))))
+      (loop [guard 1000]
+        (when (and (pos? guard)
+                   (pos? (car/wcar {} (car/scard indexes-key))))
+          (sec-idx/removed-expired-keys {} indexes-key)
+          (recur (dec guard))))
+      (is (= #{} (into #{} (car/wcar {} (car/smembers indexes-key))))))))
 
 (defn test-fn [x] x)
 
@@ -101,7 +114,7 @@
         indexes-key (keys/sec-indexes-key util/test-keygen)]
     (with-redefs [daemon/sec-index-interval 100000000000000]
       (m/memo-add! f {[1] (m/with-tag-id 100 :test-tag 55)})
-      (is (= {[1] 100} (m/as-map f)))
+      (is (= {[1] 100} (util/unwrap-as-map (m/as-map f))))
       (is (= 100 (util/get-entry* f [1])))
       (is (= ['("MMRS-TEST" "" [:test-tag 55])] (car/wcar {} (car/smembers indexes-key))))
       (is (= 1 (car/wcar {} (car/exists id-key)))))))

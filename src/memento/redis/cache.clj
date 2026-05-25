@@ -9,8 +9,9 @@
     [memento.redis.util :as util]
     [taoensso.carmine :as car])
   (:import (clojure.lang IDeref)
-           (memento.base EntryMeta ICache Segment)
-           (memento.redis.poll Loader)))
+            (memento.base EntryMeta ICache Segment)
+            (memento.redis EntryEnvelope)
+            (memento.redis.poll Loader)))
 
 (defrecord RedisCache [conf fns cname ^Loader lookup]
   ICache
@@ -72,41 +73,25 @@
       this))
   (addEntries [this segment args-to-vals]
     (when (seq args-to-vals)
-      (let [{:keys [key-fn conn]} fns
-            c (conn)
-            ;; collect all kv-s without secondary index to bulk push them, but run secondary index
-            ;; ones one by one
-            remaining (->> args-to-vals
-                           (reduce-kv
-                             (fn [coll k v]
-                               (let [cval (loader/cval v) ckey (key-fn segment k)]
-                                 (if (and (instance? EntryMeta v) (.getTagIdents ^EntryMeta v))
-                                   (do (.putValue lookup c segment ckey cval) coll)
-                                   (conj coll [ckey cval]))))
-                             [])
-                           car/return
-                           (car/wcar c))
-            by-expiry (group-by (fn [[k v]] (.expiryMs lookup segment k v)) remaining)]
-        ;; those without secondary indexes we can push freely
-        (doseq [[expiry items] by-expiry
-                batch (partition-all 100 items)]
-          (car/wcar c
-            (car/lua loader/bulk-set
-                     (mapv first batch)
-                     (conj (mapv second batch) (or expiry -1))))))))
+      (let [{:keys [key-fn conn]} fns]
+        (.putEntries lookup (conn) segment args-to-vals key-fn)))
+    this)
   (asMap [this]
     (let [{:keys [conn keygen]} fns]
-      (util/kv-by-pattern
+      (util/kv-by-pattern-raw
         (conn)
         (keys/cache-wildcard-key keygen cname)
         #(keys/entry-key? keygen cname %)
-        #(next (next %)))))
+        nnext
+        #(EntryEnvelope/readEnvelopeIfEntry %))))
   (asMap [this segment]
     (let [{:keys [conn keygen]} fns]
-      (util/kv-by-pattern
+      (util/kv-by-pattern-raw
         (conn)
         (keys/segment-wildcard-key keygen cname segment)
-        #(last %)))))
+        (constantly true)
+        last
+        #(EntryEnvelope/readEnvelopeIfEntry %)))))
 
 (defn conf-cache-name [conf]
   (:memento.redis/name conf ""))

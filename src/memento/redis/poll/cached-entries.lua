@@ -1,18 +1,27 @@
--- special load marker that will be returned
--- when there is no value there, meaning that the expected
--- load token has expired without a foreign loader returning a value
--- this load token also does double duty as a type example
-local load_marker = ARGV[1];
-
+-- KEYS layout: [k1, k2, ...]
+-- For each input key, returns one of:
+--   {i, 0}                          load marker still present (foreign loader has not written)
+--   {i, 1, rawBytes}                value present (envelope bytes; may decode to nil)
+--   {i, 2}                          key absent (foreign loader gave up / expired)
+--
+-- Status codes are integers so they survive Carmine's car/parse-raw cleanly.
+-- We return the input *index* (1-based) rather than KEYS[i] so parse-raw does
+-- not recursively rawify the key bytes; the Clojure caller maps i back to the
+-- original key object it passed in.
 local gets = redis.call('mget', unpack(KEYS))
 local ret = {}
 for i, r in ipairs(gets) do
   if r then
-    if r:sub(1, 43) ~= load_marker:sub(1, 43) then
-      table.insert(ret, {KEYS[i], r})
+    if r:byte(1) == 0x03 then
+      -- still a load marker (foreign loader has not written yet)
+      table.insert(ret, {i, 0})
+    else
+      -- value envelope present
+      table.insert(ret, {i, 1, r})
     end
   else
-    table.insert(ret, {KEYS[i], load_marker})
+    -- key absent
+    table.insert(ret, {i, 2})
   end
 end
 return ret;

@@ -5,15 +5,12 @@
             [memento.redis.keys :as keys]
             [memento.redis.listener :as listener]
             [memento.redis.sec-index :as sec-index]
-            [taoensso.nippy :as nippy]
-            [taoensso.nippy.tools :as nippy-tools]
             [taoensso.carmine :as car])
-  (:import (java.io DataInput DataOutput)
-            (memento.base EntryMeta InvalidationClock TagInvalidation)
+  (:import (memento.base EntryMeta InvalidationClock TagInvalidation)
+           (memento.redis EntryEnvelope)
            (java.util.concurrent ConcurrentHashMap)
            (java.util.function BiConsumer)
-           (clojure.lang Keyword)
-           (java.util ArrayList List UUID)
+           (java.util ArrayList List)
            (memento.redis.poll Load Loader LoaderSupport)))
 
 (def ^ConcurrentHashMap maint
@@ -24,18 +21,6 @@
   - If not, a foreign JVM is going to deliver to Redis, and we must scan redis for it."
   (ConcurrentHashMap. 4 (float 0.75) 8))
 
-(nippy/extend-freeze EntryMeta ::b/entry-meta [^EntryMeta x data-output]
-                     (nippy/-freeze-with-meta! (.getV x) data-output)
-                     (.writeBoolean ^DataOutput data-output (.isNoCache x))
-                     (nippy/-freeze-with-meta! (.getTagIdents x) data-output))
-
-(nippy/extend-thaw ::b/entry-meta [data-input]
-  (EntryMeta. (nippy/thaw-from-in! data-input) (.readBoolean ^DataInput data-input) (nippy/thaw-from-in! data-input)))
-
-(defrecord LoadMarker [x])
-
-(defn new-load-marker [] (->LoadMarker (UUID/randomUUID)))
-
 (def load-marker-fade-sec
   "How long before a load marker fades. This is to prevent JVM exiting or dying from leaving LoadMarkers
   in Redis indefinitely, causing everyone to block on that key forever. This time is refreshed every
@@ -44,48 +29,57 @@
   Adjust this setting appropriately via memento.redis.load_marker_fade system property."
   (Integer/parseInt (System/getProperty "memento.redis.load_marker_fade" "5")))
 
-(defn cval
-  "Carmine saves Numbers and Keywords as Strings, so when you fetch them, they are just left as strings,
-  so we force Nippy serialization. We also force Strings to nippy so we can get the benefit of automatic
-  LZ4 compression on big strings (like people dumping whole JSONs and HTML responses into our DB)."
-  [v]
-  (condp instance? v
-    String (nippy-tools/wrap-for-freezing v)
-    Number (nippy-tools/wrap-for-freezing v)
-    Keyword (nippy-tools/wrap-for-freezing v)
-    v))
-
 (def cached-entries-script (slurp (io/resource "memento/redis/poll/cached-entries.lua")))
 (def refresh-load-markers-script (slurp (io/resource "memento/redis/poll/refresh-load-markers.lua")))
 
-(defn cached-entries
-  "Fetches keys, to retrieve values entered/calculated by a foreign cache (other JVM).
-
-  If load marker is still there, the key is not returned.
-  If a value is there, we return a [key value] pair.
-  If the value is not there, then the marker has expired, the foreign loader is dead or stalled.
-  In that case the script returns the special *our* load marker, and this function returns
-  [key, b/absent]."
-  [conn ks]
-  (when (seq ks)
-    (let [our-load-marker (new-load-marker)]
-      (for [[k v] (car/wcar conn (car/lua cached-entries-script ks [our-load-marker]))]
-        (list k (if (= our-load-marker v) b/absent v))))))
-
 (defn latest-tag-invalidation
+  "Compute the latest tag-invalidation epoch for a value about to be delivered."
   [v]
-  (if (instance? EntryMeta v)
+  (cond
+    (instance? EntryMeta v)
     (.lastInvalidatedEpoch TagInvalidation/INSTANCE (.getTagIdents ^EntryMeta v))
+
+    :else
     InvalidationClock/NO_INVALIDATION_EPOCH))
+
+(defn cached-entries
+  "Fetches keys to retrieve values stored by foreign JVMs.
+
+  Returns a list of [key load-obj delivery-value] triples where delivery-value
+  is one of:
+    - :load-marker            → status 0: still a foreign load marker, keep waiting
+    - b/absent                → status 2: key missing entirely (foreign loader died)
+    - EntryMeta               → status 1: real value envelope, decoded
+
+  See doc/future-tag-invalidation.md §5.9 for the cross-JVM joiner path semantics."
+  [conn k-loads]
+  (when (seq k-loads)
+    (let [k-loads-vec (vec k-loads)
+          raw-results (car/wcar conn
+                        (car/parse-raw
+                          (car/lua cached-entries-script (mapv first k-loads-vec) [])))]
+      (keep (fn [[i status ^bytes env]]
+              (let [[k load] (nth k-loads-vec (dec (long i)))]
+                (case (long status)
+                  0 nil
+                  2 [k load b/absent]
+                  1 (let [delivered (if (EntryEnvelope/isEntryEnvelope env)
+                                       (EntryEnvelope/readEnvelope env)
+                                       (do (car/wcar conn (car/del k)) b/absent))]
+                      [k load delivered]))))
+            raw-results))))
 
 (defn refresh-load-markers
   "Refresh expire of load markers under keys ks, if they are still the same as we
-  expect."
+  expect. markers must contain raw [0x03][16B UUID] byte arrays."
   [conn ^List ks ^List markers marker-fade]
   (when (seq ks)
-    (.add markers marker-fade)
-    (car/wcar conn
-      (car/lua refresh-load-markers-script ks markers))))
+      (let [argv (ArrayList.)]
+        (doseq [m markers]
+          (.add argv (car/raw m)))
+      (.add argv marker-fade)
+      (car/wcar conn
+                (car/lua refresh-load-markers-script ks argv)))))
 
 (defn maintain-conn-loads
   "Maintains the list of ongoing loads. It will fetch and fill promises for entries that were
@@ -96,22 +90,21 @@
   [conn ^ConcurrentHashMap loads-map refresh-load-markers?]
   (let [load-marker-keys (ArrayList.)
         load-markers (ArrayList.)
-        upstream-entries (ArrayList.)
+        upstream-keys (ArrayList.)
         extractor (reify BiConsumer
-                    (accept [this k load]
-                      (if-let [marker (.getLoadMarker ^Load load)]
-                        (when refresh-load-markers?
-                          (.add load-marker-keys k)
-                          (.add load-markers marker))
-                        (.add upstream-entries k))))]
+                     (accept [this k load]
+                       (if-let [marker (.loadMarkerBytes ^Load load)]
+                         (when refresh-load-markers?
+                           (.add load-marker-keys k)
+                           (.add load-markers marker))
+                        (.add upstream-keys [k load]))))]
     (.forEach loads-map extractor)
     (when refresh-load-markers?
       (refresh-load-markers conn load-marker-keys load-markers load-marker-fade-sec))
-    (doseq [[k v] (cached-entries conn upstream-entries)
-            :let [^Load load (.remove loads-map k)]]
-      (when load
-        (let [p (.getPromise load)]
-          (.deliver p v (latest-tag-invalidation v))
+    (doseq [[k load delivery] (cached-entries conn upstream-keys)]
+      (when (.remove loads-map k load)
+        (let [p (.getPromise ^Load load)]
+          (.deliver p delivery (latest-tag-invalidation delivery))
           (.releaseResult p))))))
 
 (defn maintenance-step
@@ -142,53 +135,100 @@
 (def fetch-script (slurp (io/resource "memento/redis/fetch.lua")))
 
 (defn fetch
-  "Fetch a value, returns [present? val].
-  If load-ms is positive, insert a loader marker with the specified expiry.
-  Also refreshes expiry if fade is used.
+  "Fetch a value, returns [present? val validation-epoch].
 
-  load-ms is load marker liveness in ms
-  load-marker must always be provided, even if not setting it, as it's used as
-  type template in an IF
+  Under the wire protocol (§5.1), `val` comes back as raw bytes (envelope
+  bytes for cached values, 17-byte load-marker bytes for foreign / our load
+  markers, nil for missing keys when load-ms is non-positive).
 
-  fade-ms is fade setting for entries in ms if any"
+  load-marker is a UUID; it is serialized to its 17-byte wire
+  shape via (car/raw (Load/loadMarkerBytes load-marker)) at the Lua call boundary
+  so byte-equality inside abandon-load.lua / refresh-load-markers.lua /
+  finish-load*.lua works.
+
+  load-ms is load marker liveness in ms; if 0 or negative, no load marker is
+  inserted (used by Loader.ifCached).
+
+  fade-ms is fade setting for entries in ms if any."
   [conn k epoch-key load-marker load-ms fade-ms]
   (car/wcar conn
-    (car/lua fetch-script
-             {:k k :epoch-key epoch-key}
-             {:fade-ms (if fade-ms fade-ms -1)
-              :load (if (and load-ms (pos-int? load-ms)) 1 0)
-              :load-marker load-marker
-              :load-ms load-ms})))
+    (car/parse-raw
+      (car/lua fetch-script
+               {:k k :epoch-key epoch-key}
+               {:fade-ms (if fade-ms fade-ms -1)
+                :load (if (and load-ms (pos-int? load-ms)) 1 0)
+                :load-marker (car/raw (Load/loadMarkerBytes load-marker))
+                :load-ms load-ms}))))
 
 (def abandon-load-script (slurp (io/resource "memento/redis/poll/abandon-load.lua")))
 (def finish-load-script (slurp (io/resource "memento/redis/poll/finish-load.lua")))
+(def put-value-script (slurp (io/resource "memento/redis/poll/put-value.lua")))
+(def put-value-w-sec-script (slurp (io/resource "memento/redis/poll/put-value-w-sec.lua")))
 (def bulk-set (slurp (io/resource "memento/redis/poll/bulk-set.lua")))
 
 (def support
   (reify LoaderSupport
-    (newLoadMarker [this] (new-load-marker))
-    (isLoadMarker [this o] (instance? LoadMarker o))
-    (fetchEntry [this conn cname kg k load-marker load-ms fade-ms]
-      (fetch conn k (keys/epoch-key kg cname) load-marker load-ms fade-ms))
-    (completeLoad [this conn key-list v load-marker expire validation-epoch]
-      (let [values {:load-marker load-marker
-                    :v (cval v)
+    (fetchEntry [this conn k load load-ms fade-ms]
+      (fetch conn
+             k
+             (keys/epoch-key (.getKeysGenerator ^Load load) (.getCacheName ^Load load))
+             (.getLoadMarker ^Load load)
+             load-ms
+             fade-ms))
+    (fetchCachedEntry [this conn cname kg k fade-ms]
+      (car/wcar conn
+        (car/parse-raw
+          (car/lua fetch-script
+                   {:k k :epoch-key (keys/epoch-key kg cname)}
+                   {:fade-ms (if fade-ms fade-ms -1)
+                    :load 0
+                    :load-marker (car/raw (byte-array 0))
+                    :load-ms 0}))))
+    (completeLoad [this conn key-list value load expire]
+      ;; Serialize the loader result at the Redis boundary. completeLoad is only
+      ;; used by claimed loader paths, so the marker is always a real UUID.
+      (let [values {:load-marker (car/raw (.loadMarkerBytes ^Load load))
+                    :v (car/raw (EntryEnvelope/writeEnvelope value))
                     :ttl-ms (or expire -1)
-                    :validation-epoch (or validation-epoch -1)}]
+                    :validation-epoch (or (.getValidationEpoch ^Load load) -1)}]
         (if (= 1 (count key-list))
           (car/wcar conn (car/lua finish-load-script {:k (first key-list)} values))
           (let [ret (car/wcar conn (car/lua sec-index/finish-load-script key-list values))]
             (.put sec-index/all-indexes [conn (second key-list)] true)
             ret))))
-    (abandonLoad [this conn key load-marker]
+    (putValue [this conn cname kg k value expire]
+      ;; putValue is an explicit write, not a claimed load completion.
+      (let [tag-idents (when (instance? EntryMeta value)
+                         (let [entry ^EntryMeta value]
+                           (when (.isNoCache entry)
+                             (throw (IllegalArgumentException. "Cannot store a no-cache EntryMeta")))
+                           (.getTagIdents entry)))
+            values {:v (car/raw (EntryEnvelope/writeEnvelope value))
+                    :ttl-ms (or expire -1)}]
+        (if-let [tag-idents (seq tag-idents)]
+          (let [key-list (sec-index/keys-param-for-sec-idx kg k cname tag-idents)
+                ret (car/wcar conn (car/lua put-value-w-sec-script key-list values))]
+            (.put sec-index/all-indexes [conn (second key-list)] true)
+            ret)
+          (car/wcar conn (car/lua put-value-script {:k k} values)))))
+    (putValues [this conn keys values expire]
       (car/wcar conn
-        (car/lua abandon-load-script {:k key} {:load-marker load-marker})))
+        (car/lua bulk-set
+                  keys
+                  (conj (mapv #(car/raw (EntryEnvelope/writeEnvelope %)) values)
+                        (or expire -1)))))
+    (abandonLoad [this conn key load]
+      (car/wcar conn
+        (car/lua abandon-load-script {:k key}
+                 {:load-marker (car/raw (.loadMarkerBytes ^Load load))})))
     (completeLoadKeys [this cname kg k tag-idents]
       (if (seq tag-idents)
         (sec-index/keys-param-for-sec-idx kg k cname tag-idents)
         [k]))
     (ensureListener [this conn]
-      (listener/ensure-l conn))))
+      (listener/ensure-l conn))
+    (delEntry [this conn key]
+      (car/wcar conn (car/del key)))))
 
 (defn for-conf [conf keygen]
   (Loader. (:memento.redis/name conf "")
