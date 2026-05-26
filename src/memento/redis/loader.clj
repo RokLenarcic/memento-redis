@@ -35,11 +35,8 @@
 (defn latest-tag-invalidation
   "Compute the latest tag-invalidation epoch for a value about to be delivered."
   [v]
-  (cond
-    (instance? EntryMeta v)
+  (if (instance? EntryMeta v)
     (.lastInvalidatedEpoch TagInvalidation/INSTANCE (.getTagIdents ^EntryMeta v))
-
-    :else
     InvalidationClock/NO_INVALIDATION_EPOCH))
 
 (defn cached-entries

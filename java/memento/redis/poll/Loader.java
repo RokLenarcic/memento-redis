@@ -259,6 +259,14 @@ public class Loader {
                 }
 
                 try {
+                    // Unknown / corrupt bytes (e.g. version 1.x entries): drop
+                    // the key so we don't keep returning absent forever
+                    // (§5.4.2 livelock prevention). Marker bytes were already
+                    // handled above, so this only fires on stale/legacy values.
+                    if (!EntryEnvelope.isEntryEnvelope(raw)) {
+                        s.delEntry(conn, key);
+                        return EntryMeta.absent;
+                    }
                     // value envelope - dispatch on discriminator (§5.4)
                     Object ret = EntryEnvelope.readEnvelope(raw);
                     Object marked = markCached(ret);

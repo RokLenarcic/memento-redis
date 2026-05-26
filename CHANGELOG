@@ -2,13 +2,16 @@
 
 ## 2.0.x
 
-- **Breaking: Redis wire format has changed.** Existing cache entries written
-  by 1.x are not readable by 2.0.x and must be dropped before upgrading.
-  Use `(memento.redis/nuke!! #'your.memoized/function)` from an application
-  process configured with the same Redis connection and key generator as the
-  cache. Run once per distinct connection / `:memento.redis/keygen`. Only
-  cached data is removed; values are recomputed on demand. See the README
-  "Upgrade Warning" section for details.
+- **Redis wire format has changed.** Entries written by 1.x are not
+  compatible with 2.0.x. You do not have to wipe Redis before upgrading: on
+  first access to a 1.x key, 2.0.x treats it as stale, drops it, and
+  recomputes the value into the new format. Old entries self-heal lazily as
+  they are read. If you prefer to clear all old entries up front, run
+  `(memento.redis/nuke!! #'your.memoized/function)` from an application
+  process configured with the same Redis connection and key generator as
+  the cache (once per distinct connection / `:memento.redis/keygen`). Do
+  not run 1.x and 2.0.x writers against the same Redis keyspace
+  concurrently. See the README "Upgrade Note" section for details.
 - Requires Memento 2.1.74 or later.
 - Cached `nil` values now round-trip correctly and remain visible in `as-map`.
 - `if-cached` no longer blocks on in-flight loads and no longer rethrows

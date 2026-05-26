@@ -4,18 +4,20 @@ Memento cache backed by Redis. The underlying library is Carmine (refer to their
 
 Offers **guarantees that a cache entry is calculated only once even if using multiple JVMs**.
 
-## ⚠ Upgrade Warning: 2.0.x Requires Dropping Existing Redis Cache
+## ⚠ Upgrade Note: 2.0.x Changes the Redis Wire Format
 
 `memento-redis 2.0.x` changes the Redis wire format used for cache entries,
-load markers, and tag-invalidation metadata. Existing Redis keys written by
-`memento-redis 1.x` (or earlier) must be removed before running the new
-version, otherwise old cache contents may be unreadable or interpreted
-incorrectly.
+load markers, and tag-invalidation metadata. Entries written by
+`memento-redis 1.x` (or earlier) are not compatible with the new format.
 
-This only deletes cached data; values will be recomputed on demand.
+You do not have to wipe Redis before upgrading. On first access to a key that
+still holds a 1.x value, 2.0.x will treat it as stale, drop it, and recompute
+the value into the new format. Old entries self-heal lazily as they are read.
 
-Use the built-in nuke helper from an application process configured with the
-same Redis connection and key generator that the cache uses:
+If you want to clear all old entries up front instead of letting them
+self-heal on access, use the built-in nuke helper from an application
+process configured with the same Redis connection and key generator that
+the cache uses:
 
 ```clojure
 (require '[memento.redis :as mr])
@@ -26,6 +28,9 @@ same Redis connection and key generator that the cache uses:
 
 If you use multiple Redis databases, multiple Carmine connections, or custom
 `:memento.redis/keygen` values, run this once per Redis cache / key schema.
+
+Do not run `memento-redis 1.x` and `2.0.x` writers against the same Redis
+keyspace concurrently: 2.0.x will treat 1.x data as invalid and drop it.
 
 Memento version compatibility
 
